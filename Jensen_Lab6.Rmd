@@ -1,0 +1,414 @@
+---
+title: 'Lab 6: Connectivity'
+author: "Eric Jensen"
+date: "February 27, 2020"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+*This lab assignment highlights the use of a number of R packages to explore common approaches to predicting and mapping connectivity by addressing the problem of movement across landscapes for two endangered species: Florida panther and Snail Kite. The goals for these examples are to show how landscape resistance can be incorporated into connectivity modeling, show the similarity and differences in approaches for mapping connectivity and prioritizing patches for connectivity conservation, and highlight how different types of connectivity metrics can capture properties of connectivity operating at different spatial scales.*
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#load packages
+library(raster)           #for raster covariate data; version 2.6-7 used
+library(rgdal)            #for reading different types of GIS files; version 1.3-4 used
+library(rgeos)            #for centroids of polygons; version 0.3-28 used
+library(gdistance)        #for least-cost paths/circuit theory; version 1.2-2 used
+library(igraph)           #for patch-based graphs; version 1.2.2 used
+library(fitdistrplus)     #for kernels; version 1.0-11 used
+library(fdrtool)          #for 1Dt kernel; version 1.2.15 used
+library(tidyverse)
+library(ggthemes)
+library(viridis)
+library(sf)
+library(patchwork)
+library(landscapemetrics)
+```
+
+## Florida panther data
+
+### Set some preliminaries
+Increase memory
+```{r}
+# mem.max <- memory.limit(size=NA)
+# memory.limit(size=mem.max)
+```
+
+Load data and inspect
+```{r}
+# #set working directory where data were downloaded
+# setwd("C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6")
+# land <- raster("panther_landcover")
+# 
+# #label projection for later use
+# crs.land <- projection(land)
+# 
+# #public areas in need of connections
+# public <- readOGR("panther_publicland.shp") #consider importing as sf
+# projection(public) <- crs.land            #set projection
+# names(public@data)                        #attributes table
+# head(public@data)                         #attributes table
+# 
+# #Set the centroids of plots
+# public_centroids <- gCentroid(public, byid=T)
+```
+
+Create resistance map
+```{r}
+# #import reclassification table
+# classification <- read.table("resistance reclass.txt", header=T)
+# 
+# #reclassify landcover to resistance values
+# class <- as.matrix(classification[,c(1,3)])
+# land_cost <- reclassify(land,rcl=class)
+# 
+# # Names
+# #[1] FRED C. BABCOCK-CECIL M. WEBB WILDLIFE MANAGEMENT AREA
+# #[2] BIG CYPRESS NATIONAL PRESERVE                         
+# #[3] OKALOACOOCHEE SLOUGH STATE FOREST                     
+# #[4] KISSIMMEE PRAIRIE PRESERVE STATE PARK                 
+# #[5] FLORIDA PANTHER NATIONAL WILDLIFE REFUGE  
+```
+
+### Effective distances
+#### Question 1
+**1) Describe the primary differences using Euclidean distance, least-cost distance, commute distance, and randomized shortest-path distance to measure effective distance. Which do you feel yields the most robust estimation? (4-5 sentences) (2 pts)**
+
+Euclidean distance is a direct measure of distance between two points, as the crow flies. The least-cost distance is determined by identifying the path of lowest resistance between two locations for a given resistance layer. Commute distance is a random walk/circuit theory approach which quantifies the expected time for an individual to move from a given location to another location and back. Finally, randomized shortest-path distance (RSPD) couples least-cost paths and resistance differences as a continuum of movement possibilities based on tuning parameter $\theta$.
+
+I would argue that the RSPD is the most robust, particularly because of the tuning parameter $\theta$. It is inarguably more robust than both Euclidean distance and least-cost paths, because when $\theta = 1$ RSPD *is* the least cost path. Additionally, the $\theta$ parameter makes the approach adaptable to a variety of organisms and scenarios, reflecting stochastic decisions of organism movement.
+
+***Note:*** I have commented out all of the beginning of the script so to not rerun the rSPDistance() and commuteDistance() functions.
+```{r}
+# #create a conductance transition layer from raster layer: inverse of resistance data
+# land_cond <- transition(1/land_cost, transitionFunction=mean, 8)  # calculate based on inverse of resistance
+# 
+# #make correction; type=c for lcps; type = r for circuit (identical results for this example, so just use c)
+# land_cond <- geoCorrection(land_cond, type="c", multpl=F)
+# 
+# #geographic (Euclidean) distance matrix
+# geo.dist <- pointDistance(public_centroids, lonlat=FALSE)
+# geo.dist <- as.dist(geo.dist)
+# 
+# #least-cost distance matrix (0.68 sec on my computer)
+# lc.dist <- costDistance(land_cond, public_centroids)
+# 
+# #commutedistance matrix (~7 minutes on my computer)
+# circuit.dist <- commuteDistance(land_cond, public_centroids)
+# 
+# #randomized shortest-paths distance matrix (~12 minutes on my computer)
+# rSP.dist_t0001 <- rSPDistance(land_cond, from=public_centroids, to=public_centroids, theta=0.0001)
+# 
+# #take lower triangle of rSP.dist_t0001
+# rSP.dist_t0001.tri <- rSP.dist_t0001
+# rSP.dist_t0001.tri[upper.tri(rSP.dist_t0001.tri, diag=TRUE)] <- NA
+# rSP.dist_t0001.tri=rSP.dist_t0001.tri[, 1:4]
+# 
+# #make data frame of distances
+# # Calculating the inverse of the different distances and normalizing them to one dividing by the maximum of the inverse of the distance values
+# all.dist <- tibble(Euclidean=as.vector(geo.dist),
+#                      lcd=as.vector(lc.dist),
+#                      circuit=as.vector(circuit.dist),
+#                      rSP=na.omit(as.vector(rSP.dist_t0001.tri))) %>%
+#             mutate(Euc_norm = 1/Euclidean / max(1/Euclidean)) %>%
+#             mutate(lcd_norm = 1/lcd / max(1/lcd)) %>%
+#             mutate(cir_norm = 1/circuit / max(1/circuit)) %>%
+#             mutate(rSP_norm = 1/rSP / max(1/rSP))
+# 
+# #correlation
+# round(cor(all.dist),3)
+```
+
+#### Question 2
+**1) Questions about resistance layer reclassification:**  
+**a) How many landcover classes are represented in the “panther_landcover” raster? (0.25 pt)**  
+**Answer:** There are 43 landcover classes in the panther_landcover raster.    
+**b) How many classes remain after the reclassification to resistance, i.e., “land_cost”? (0.25 pt)**    
+**Answer:** There are 11 landcover classes in the reclassified resistance raster.    
+**c) From the supplied rankings, which landcover classes provide the most and least resistance to the movement of Florida panthers? (0.25 pt)**    
+**Answer:** Each of the subclasses under the class for coastal wetlands have the highest possible resistance level of 11, meaning it is as resistant as Spinal Tap's amps are loud.  
+**d) How are the resistance measures determined? (0.25 pt)**    
+**Answer:** The resistance measures were created based on radiotelemetry data alongside point and home range selection functions.  
+
+#### Question 3
+**3) After calculating effective distance with the four methods (Euclidean distance, least-cost distance, commute distance, and randomized shortest-paths distance), which are most and least correlated? (2 pts)**  
+**Answers:** The most correlated are the least cost distance and randomized-shortest paths distance at .996 and the least correlated are Euclidean distance and commute distance at .854.  
+
+#### Question 4
+**4) Within plot 9.7 of Fletcher and Fortin, what does a single point mean? Why are there 10 points per plot? (1 pt)**  
+**Answer:** The points represent individual paths between each of the preserves based on the measures of effective distance. There are 10 points because there are ten possible paths between the preserves
+
+
+```{r}
+# ##################
+# #public land web. This will create the line segments you need for question 4. 
+# # Create lines dataframe to populate
+# public_centroids_line=data.frame(public_centroids@coords, id=1:5)
+# public_centroids_line<-do.call(rbind, replicate(5, public_centroids_line, simplify=F))
+# 
+# nm=matrix(ncol=3)
+# for (i in 1:5){
+#   nm<-rbind(nm,do.call(rbind,replicate(5,as.matrix(public_centroids_line[i,]),simplify=FALSE)))
+# }
+# nm<-nm[-1,]
+# 
+# colnames(nm)<-c("x2","y2","id.dest")
+# newds<-cbind(public_centroids_line,as.data.frame(nm))
+# newds1<-newds[-which(newds$id==newds$id.dest),]
+# newds1$id3=abs(newds1$x-newds1$x2)
+# newds1=newds1[!duplicated(newds1$id3), ]
+# 
+# newds1$x2<-as.numeric(as.character(newds1$x2)) #converting from factor to numeric
+# newds1$y2<-as.numeric(as.character(newds1$y2))
+# 
+# l <- vector("list", nrow(newds1)) #
+# 
+# origins<-data.frame(cbind(newds1$x, newds1$y))
+# destinations<-data.frame(cbind(newds1$x2, newds1$y2))
+# 
+# library(sp)
+# for (i in seq_along(l)) {
+#   l[[i]] <- Lines(list(Line(rbind(origins[i, ], destinations[i,]))), as.character(i))
+# }
+# class(l)
+# l.spatial<-SpatialLines(l)
+# 
+# #this is what you'll need for question 5 to plot the lines and weights
+# l.spatial = sp::SpatialLinesDataFrame(l.spatial, data.frame(ID = c(1:10), all.dist), match.ID = T)
+# View(l.spatial@data)
+```
+
+Write to shapefile to avoid having to rerun previous scripts
+```{r}
+# writeOGR(l.spatial, 'C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6', 'l.spatial', driver = 'ESRI Shapefile', overwrite_layer = TRUE)
+```
+
+```{r}
+# remove(all.dist,class,classification,destinations,l,l.spatial,land,land_cond,newds,newds1,nm,origins,public,public_centroids,public_centroids_line,rSP.dist_t0001,rSP.dist_t0001.tri,circuit.dist,crs.land,geo.dist,i,lc.dist)
+```
+
+#### Question 5
+**5) Questions about the four methods of distance and movement:**
+**a) Using the four methods (Euclidean distance, least-cost distance, commute distance, and randomized shortest-paths distance), make a single four-paneled plot with line segments connecting the public land centroids with the cost raster and protected areas under these segments. Weight the line segments by the inverse of the effective distance. Use ggplot to generate the plot. See example “q5_four_distance_measures.png” (3.5 pts)**
+
+Read in l.spatial file to avoid having to rerun above functions
+```{r}
+# Reimport vector data with sf for simpler ggplot2 plotting
+l.sf <- st_read('C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6/l.spatial.shp')
+public.sf <- st_read("C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6/panther_publicland.shp")
+public <- readOGR("C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6/panther_publicland.shp") #consider importing as sf
+public_centroids <- gCentroid(public, byid=T)
+
+#import reclassification table
+classification <- read.table("C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6/resistance reclass.txt", header=T)
+
+#reclassify landcover to resistance values
+class <- as.matrix(classification[,c(1,3)])
+land <- raster("C:/Users/erjensen/Documents/ECOL620/Lab6/data_for_lab6/panther_landcover")
+land_cost <- reclassify(land,rcl=class)
+
+#create a conductance transition layer from raster layer: i
+land_cond <- transition(1/land_cost, transitionFunction=mean, 8)
+#make correction; type=c for lcps; type = r for circuit (id
+land_cond <- geoCorrection(land_cond, type="c", multpl=F)
+```
+
+Plot the four methods of movement
+```{r fig.width=8,fig.height=8}
+#convert resistance layer raster to dataframe for plotting
+land_cost_df <- as.data.frame(land_cost, xy = TRUE) 
+
+# Create base plot to build additional plots off of
+gg_base <- ggplot()+
+  geom_raster(land_cost_df,mapping = aes(x = x, y = y, fill = gfchab_500cl2)) +
+  geom_sf(public.sf, mapping = aes(),fill='grey65',color='grey15',cex=1)+
+  xlab('Easting (m)') + ylab('Northing (m)')+
+  scale_fill_viridis()+
+  scale_y_discrete(breaks=c(200000,300000,400000))+
+  scale_x_discrete(breaks=c(600000,700000,800000))+
+  theme_few()
+
+# Euclidean plot
+gg_euc <- gg_base +
+  geom_sf(l.sf, mapping = aes(size = Euc_norm))+
+  theme(legend.position = "none")+
+  ggtitle('Euclidean distance')
+
+# Least cost distance plot
+gg_lcd <- gg_base +
+  geom_sf(l.sf, mapping = aes(size = lcd_norm))+
+  theme(legend.position = "none")+
+  ggtitle('Least-cost distance')
+
+# Circuit theory plot
+gg_cir <- gg_base +
+  geom_sf(l.sf, mapping = aes(size = cir_norm))+
+  theme(legend.position = "none")+
+  ggtitle('Circuit theory')
+
+# Randomized shortest path plot
+gg_rsp <- gg_base +
+  geom_sf(l.sf, mapping = aes(size = rSP_norm))+
+  theme(legend.position = "none")+
+  ggtitle('Randomized shortest paths')
+
+# Plot grid with patchwork
+(gg_euc | gg_lcd) /
+(gg_cir | gg_rsp)
+```
+
+**b) Do you see any significant differences among the methods? (0.5 pt)**  
+**Answer:** The circuit theory analysis and the Euclidean distance are the least correlated among the pairs of movement distance calculations. Even the rank order of the individual paths in terms of distance are fairly different between these two methods.  
+**c) Which conservation area pairing shows the greatest travel cost by least cost distance? The least cost by circuit theory? Please provide the names of the parks. (0.5 pt)**  
+**Answer:** The greatest travel cost for the least-cost distance metric is for the path between Big Cypress National Preserve and Kissimmee Prairie Preserve State Park. By circuit theory, the greatest travel cost is between Kissimmee Prairie Preserve State Park and Fred C. Babcock-Cecil M. Webb Wildlife Management Area.
+
+```{r}
+remove(gg_base,gg_cir,gg_euc,gg_rsp,gg_lcd)
+```
+
+#### Question 6
+**6) Plot the least cost-path and least-cost corridor between Okaloacoochee Slough State Forest and Fred C. Babcock-Cecil M. Webb Wildlife Management Area using the lower 20% of accumulated cost cells. Include the outline of the conservation areas, the centroid points (of the conservation areas), and the resistance surface. Use ggplot to generate the plot. (4 pts)**
+
+### Least-cost path and least-cost corridor
+Least-cost path
+```{r}
+#crop to focal area
+fpwr_ossf_extent <- extent(642000,683000,237000,298000)
+land_sub <- crop(land, fpwr_ossf_extent)
+land_cost_sub <- crop(land_cost, fpwr_ossf_extent)
+land_cond_sub <- transition(1/land_cost_sub, transitionFunction=mean, 8)
+land_cond_sub <- geoCorrection(land_cond_sub, type="c", multpl=FALSE)
+
+#get lcp
+fpwr_ossf_lcp <- shortestPath(land_cond, public_centroids@coords[5,], public_centroids@coords[3,], output="SpatialLines")
+```
+
+Least-cost corridor
+```{r}
+#get cumulative costs from each PA
+fpwr.cost <- accCost(land_cond_sub, public_centroids@coords[5,])
+ossf.cost <- accCost(land_cond_sub, public_centroids@coords[3,])
+
+#get least-cost corridor
+leastcost_corridor <- overlay(fpwr.cost, ossf.cost, fun=function(x, y){return(x + y)})
+
+#get lower quantile
+quantile10 <- quantile(leastcost_corridor, probs=0.10, na.rm=TRUE)
+
+#make new truncated layer
+leastcost_corridor10 <- leastcost_corridor
+values(leastcost_corridor10) <- NA
+leastcost_corridor10[leastcost_corridor < quantile10] <- 1 #truncate to identify corridor
+```
+
+Plotting least-cost path and corridors with ggplot
+```{r}
+gg_corridor=as.data.frame(leastcost_corridor, xy=T)
+gg_corridor10=as.data.frame(leastcost_corridor10, xy=T)
+gg_lcp= sp::SpatialLinesDataFrame(fpwr_ossf_lcp, data.frame(ID = c(1)), match.ID = F)
+poly_two_park=subset(public, MANAME=="FLORIDA PANTHER NATIONAL WILDLIFE REFUGE"|MANAME=="OKALOACOOCHEE SLOUGH STATE FOREST")
+
+ggplot()+
+  geom_raster(data=gg_corridor, aes(x=x, y=y, fill=(layer)))+
+  geom_raster(data=na.omit(gg_corridor10), aes(x=x, y=y), fill="gray")+
+  geom_path(data=gg_lcp,  aes(x=long, y=lat), size=2, colour="red")+
+  geom_point(data=as.data.frame(public_centroids), aes(x=x, y=y),colour="white", size=4)+
+  geom_polygon(data=poly_two_park, aes(x=long, y=lat, group=group),colour="white", fill="gray", alpha=.3)+
+   coord_equal(xlim=c(min(gg_corridor$x),max(gg_corridor$x)),
+              ylim=c(min(gg_corridor$y),max(gg_corridor$y)))+
+  scale_fill_viridis(option = "B", direction=-1)+
+  theme_classic()+
+  labs(y="Northing (m)", x="Easting (m)", fill="Sum of the \ncumulative \nresistances")+
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(text = element_text(size=15))
+```
+
+**a) What is the dominant cover type in the corridor? (1 pt)**
+```{r}
+# Apply mask of corridor to produce landcover classes in corridor
+land_masked <- mask(land_sub, leastcost_corridor10)
+# Convert to dataframe and manipulate to produce dataframe with cover types and counts of cells
+land_masked_df <- tibble(as.data.frame(land_masked))%>%
+  rename(class = `as.data.frame(land_masked)`) %>%
+  filter(!is.na(class)) %>%
+  mutate(Landcover = as.numeric(unlist(class))) %>%
+  select(Landcover) %>%
+  group_by(Landcover) %>%
+  mutate(count = n()) %>%
+  unique() %>%
+  left_join(classification, by = 'Landcover') %>%
+  filter(count == max(count))
+```
+**Answer:** The dominant cover type is cypress swamp with 220 pixels.
+
+**b) What’s the Shannon diversity and evenness in the corridor? (1 pt)**
+```{r}
+corridor_SHDI <- lsm_l_shdi(land_masked)$value
+corridor_SHEI <- lsm_l_shei(land_masked)$value
+```
+**Answer:** The Shannon diversity index for the corridor is `r corridor_SHDI` and the Shannon evenness index is `r corridor_SHEI`.
+
+```{r}
+remove(corridor_SHDI,corridor_SHEI,land_masked,land_masked_df,gg_lcp,fpwr.cost,fpwr_ossf_extent,fpwr_ossf_lcp,leastcost_corridor,leastcost_corridor10,land_sub,poly_two_park,quantile10,class,classification,gg_corridor,gg_corridor10,ossf.cost,land_cond)
+```
+
+
+### Flow mapping
+#### Question 7
+**7) Generate figure 9.10. What do the theta values signify? How do they influence connectivity measures? (2 pts)**  
+```{r}
+#flow mapping under different thetas
+passage.map_t0 <- passage(land_cond_sub, origin=public_centroids@coords[3,], goal=public_centroids@coords[5,], theta=0)
+passage.map_t000001 <- passage(land_cond_sub, origin=public_centroids@coords[3,], goal=public_centroids@coords[5,], theta=0.000001,totalNet = "total")
+passage.map_t00001 <- passage(land_cond_sub, origin=public_centroids@coords[3,], goal=public_centroids@coords[5,], theta=0.00001,totalNet = "total")
+passage.map_t0001 <- passage(land_cond_sub, origin=public_centroids@coords[3,], goal=public_centroids@coords[5,], theta=0.0001,totalNet = "total")
+passage.map_t001 <- passage(land_cond_sub, origin=public_centroids@coords[3,], goal=public_centroids@coords[5,], theta=0.001)
+passage.map_t005 <- passage(land_cond_sub, origin=public_centroids@coords[3,], goal=public_centroids@coords[5,], theta=0.005)
+
+# Get two parks as sf
+two_parks_sf <- public.sf %>%
+  filter(MA_ID %in% c(999,1341))
+```
+
+```{r fig.width=10,fig.height=8}
+#Theme to apply to all plots
+RSPD_theme <- theme_hc() +
+  theme(axis.text=element_blank(),axis.ticks=element_blank(), plot.title = element_text(size=20, hjust=.5), legend.position="none")
+
+# Function to produce base plots for each theta value
+plot_rspd <- function(df, str){
+  rspd_plot <- ggplot() +
+    geom_raster(df, mapping = aes(x = x, y = y, fill = layer)) +
+    geom_sf(two_parks_sf, mapping = aes(),fill='grey65',color='white',cex=1, alpha = .6)+
+    scale_fill_viridis(option='inferno')+
+    xlab("Easting (m)") + ylab("Northing (m)") +
+    ggtitle(str)+
+    RSPD_theme}
+
+#list of input rasters
+passage_rasters <- list(passage.map_t0, passage.map_t000001, passage.map_t00001,passage.map_t0001,passage.map_t001, passage.map_t005)
+#list of title strings
+rspd_strs <- list('θ=0','θ=0.000001','θ=0.00001','θ=0.0001','θ=0.001','θ=0.005')
+
+#for loop to output list of gg_plots
+gg_rspd = list()
+for (i in 1:length(passage_rasters)){
+  rspd_df <- as.data.frame(passage_rasters[[i]],xy=TRUE)
+  rspd_str <- rspd_strs[i]
+  rspd_gg <- plot_rspd(rspd_df, rspd_str)
+  tmp <- list(rspd_gg)
+  gg_rspd[i]<- tmp
+}
+
+# Create plot layout in patchwork
+# png("rspd_grid.png")
+# (gg_rspd[1][[1]] | gg_rspd[2][[1]] | gg_rspd[3][[1]]) /
+# (gg_rspd[4][[1]] | gg_rspd[5][[1]] | gg_rspd[6][[1]])
+# dev.off()
+```
+
+![Plots of randomized shortest-path distance](C:/Users/erjensen/Documents/ECOL620/Lab6/rspd_grid.png)   

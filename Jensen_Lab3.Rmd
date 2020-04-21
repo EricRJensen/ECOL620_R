@@ -1,0 +1,281 @@
+---
+title: 'Lab 3: Spatial Dispersion and Point Data'
+author: "Eric Jensen"
+date: "2/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#load packages
+library(spatstat)          #for point pattern analyses; version 1.56-1 used
+library(raster)            #for raster covariate data; version 2.6-7 used
+library(ggplot2)
+library(viridis)
+library(readr)
+library(cowplot)
+library(ggthemes)
+```
+
+### Question 1
+**1. Describe the biological use of Ripley's K-function and L-function. Differentiate the differences between the two functions. (2 pts)**  
+**Answer:** Ripley's K- and L-functions are useful for exploring second-order spatial characteristics of point patterns of ecological phenomena. Point patterns include phenomena such as locations of plant species or nests. Specifically, Ripley's K- and L-functions represent the relationship between points and other points to assess whether points tend to be clustered, random, or dispersed. 
+
+The L-function is the square root of the K-function normalized by $\pi$. In our analysis we also subtracted $r$ to normalize the plots on 0 to more easily assess clustering and dispersion.  
+
+### Question 2
+**2. Describe the scale of L-function and provide ecological meaning for the range of values. (1 pt)**  
+**Answer:** The L-function can evaluate distributions of ecological points across a variety of scales. At smaller lag distances shorter radii are being evaluated and at larger lag distances longer radii are being evaluated. Thus, the analyst can evaluate clustering, randomness, and dispersion at a variety of scale.  
+
+Ripley's L-function would likely be ecological meaningful in mid-elevation Front Range coniferous forests, for example. Many of these forests have been shaped by fire with islands of ponderosa pine that have survived fire facilatating recruitment of new ponderosa pine nearby. At the shortest lag distances we would expect to see dispersion, because there is some distance between most pines, but at somewhat less short to intermediate lag distances we would exprect clustering to dominate. Ripley's L-function can help to evaluate relationships between points at a variety of scales.  
+
+### Question 3
+**3. Why are edge effect correction factors necessary? (2 pt)**  
+**Answer:** Edge correction is necessary because as the lag-distance is expanded eventually the radius will be large enough to cross into areas where data haven't been collected. It would be incorrect to assume that there are no points of interest in those unmapped areas, and so an edge correction is applied based on certain assumptions about how the process would play out in adjacent geographies for the purpose of point pattern analyssis.  
+
+## Cactus Data
+### Question 4
+**4. Include the heat map (using ggplot) of the Ordway-Swisher Biological Station cactus data (e.g. Figure 4.4d). Use a smoothing parameter that best matches (Figure 4.4d). Visually, do the data appear randomly distributed? (2 pt)**  
+
+**Answer:** The data do not appear to be spatially random. There appears to be some spatial structure in the distribution of the cacti.  
+
+```{r}
+################################
+#question 4 
+#import the data from directory
+cactus <- read_csv("C:/Users/erjensen/Documents/ECOL620/Lab3/data_for_lab3/cactus.csv")
+boundary <- read.csv("C:/Users/erjensen/Documents/ECOL620/Lab3/data_for_lab3/cactus_boundaries.csv",header=T)
+
+#create spatstat objects
+ppp.window <- owin(xrange=c(boundary$Xmin, boundary$Xmax),
+                 yrange=c(boundary$Ymin, boundary$Ymax))
+ppp.cactus <- ppp(cactus$East, cactus$North, window=ppp.window)
+
+#summary information
+summary(ppp.cactus)
+summary(ppp.cactus)$intensity
+#the Average intensity that summary yields is Î»
+
+#density plots
+den_cat=as.data.frame(density(ppp.cactus,2))
+
+#kernel density map -- 15 appeared to be the optimal kernel size
+ggplot() +
+  geom_tile(data=den_cat, aes(x=x, y=y, fill = value)) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0))+ 
+  scale_fill_viridis(option = "plasma")+
+  coord_fixed(ratio = 1)+
+  theme_bw()+
+  labs(x = "Longitude (m)", y = "Latitude (m)", fill="Opuntia humifusa\ndensity \n(cactus/m^2)")+
+  theme(legend.title.align=0.5) +
+  theme(text = element_text(size=15))
+```
+
+### Question 5
+**5. What conclusion do you draw from the quadrat.test with a 4 by 4 quadrat (Line 84)? What are the shortcomings of this approach? (2 pt)**  
+
+**Answer:** The null hypothesis of complete spatial randomness can be rejected based on the p-value being below .05. Two shortcomings of this approach are, first, that the spatial scale of 4x4 quadrats was selected arbitrarily and, second, that the we are not able to assess the relationship between points through space. That is, there may be clustering at some scales and not at others and the chi-squared test provides a crude evaluation.  
+
+```{r}
+#question 5 
+#quadrat counts
+Q <- quadratcount(ppp.cactus, nx = 4, ny = 4) #counts in 12.5 x 12.5m quadrats
+
+#plot
+plot(ppp.cactus, cex = 2)
+plot(Q, add = TRUE, cex = 1)
+
+#chi-sq test for complete spatial randomness, CSR
+quadrat.test(ppp.cactus, nx = 4, ny = 4, method="Chisq")
+```
+
+### Question 6
+**6. When implementing the isotropic edge effect correction for the L-function for Ordway-Swisher Biological Station cactus data (Line 121), where do you see the greatest observed difference from the uncorrected L-function occur (Line 107)? Include both plots (uncorrected and corrected) using the isotropic correction. Plot with ggplot. (2 pts)**  
+
+**Answer:** The greatest difference between the uncorrected L-function and the corrected L-function are at lag distances of greater than 7. This is because of the edge effects from lag distances extending beyond our point data in in the uncorrected L-function.  
+
+```{r}
+#question 6
+#plot L with 1:1 expectation
+set.seed(10)
+Lnone <- Lest(ppp.cactus, correction="none")
+
+#isotropic edge correction
+Liso <- Lest(ppp.cactus, correction="isotropic")
+
+#ggplot code for question #6
+Lnone_plot <- ggplot()+
+  geom_line(data=Lnone, aes(x=r, y=theo-r), colour="red")+
+  geom_line(data=Lnone, aes(x=r, y=un-r), colour="black")+
+  labs(x="r", y="L(r)-r")+
+  theme_classic()+
+  theme(text = element_text(size=15))
+
+Liso_plot <- ggplot()+
+  geom_line(data=Liso, aes(x=r, y=theo-r), colour="red")+
+  geom_line(data=Liso, aes(x=r, y=iso-r), colour="black")+
+  labs(x="r", y="L(r)-r")+
+  theme_classic()+
+  theme(text = element_text(size=15))
+
+plot_grid(Lnone_plot,Liso_plot, labels="AUTO", rel_heights = c(1,1))
+```
+
+### Question 7
+**7. Using a point-wise envelope (� level of 0.05, isotropic correction), at what scales(s) do you reject the null hypothesis? In these regions, are the data clumped, randomly distributed, or uniform? No plot needed. (2 pt)**  
+
+**Answer:** We would reject the null hypothesis of spatial randomness at lag distances of greater than about two. The cacti data are more clustered than we would expect under a spatially random distribution as indicated by the observed L-function curve being above the confidence envelope over most of the plot.  
+
+## Ponderosa Pine data
+### Question 8
+**8. Examining the ponderosa pine data included within the spatstat package (Line 144), how would you characterize the distribution of trees? If there is clumping, at what scale(s)? Use the envelope function to justify your conclusion. Include the point-wise confidence envelope plot using an $/alpha$ level of 0.01 and isotropic correction. Include the plot (produced in ggplot) of the tree locations and of the L-function with envelope (3 pts). (See example: plot_for_q8.pdf)**  
+
+**Answers**  
+The distribution of trees appears fairly random across most of the plot. There are a few areas that have somewhat fewer trees than I would expect under randomness, but otherwise the distribution is fairly dispersed. Any clustering appears to be at intermediate scales, with trees being somewhat dispersed at shorter lag distances.  
+
+My assessment is validated by the L-estimate and its Monte Carlo envelope. At lag distances of less than about 7 meters the L-estimate curve is near the lower threshold of the envelope, however clustering begins to become more significant at lags of about 30 meters as the curve approaches the upper threshold of the envelope. This assessment was based on an alpha of .02, as produced in the previous L-estimate calculations for cacti.  
+
+To produce the plot with an alpha of .01, I set the rank to .5 (for pointwise tests alpha = 2 * rank/(1 + nsim))  
+
+```{r}
+####################################################################################################
+####################################################################################################
+#question 8
+#ponderosa data section
+set.seed(42)
+
+ppp.ponderosa<-ponderosa
+
+# Plot of ponderosa point data
+Pdist_plot <- ggplot()+
+  geom_point(data=as.data.frame(ppp.ponderosa), aes(x=x, y=y), colour="darkgreen")+
+  labs(y = "northing (m)", x = "easting (m)")+
+  theme_bw()+
+  theme(text = element_text(size=15))+
+  coord_equal()+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r, fig.width=12,fig.height=6}
+# Calculate L-estimates and Monte Carlo envelopes for the ponderosa dataset
+Lpond <- Lest(ppp.ponderosa, correction="isotropic")
+Lpond_envi <- envelope(ppp.ponderosa, Lest, nsim=99, rank=.5, correction="isotropic", global=F)
+Lpond_envi <- dplyr::mutate(Lpond_envi, norm = obs-r)
+Lpond_envi <- dplyr::mutate(Lpond_envi, envHi = hi-r)
+Lpond_envi <- dplyr::mutate(Lpond_envi, envLo = lo-r)
+
+Pliso_plot <- ggplot()+
+  geom_line(data = Lpond_envi, aes(x=r, y=norm), cex=1)+
+  geom_ribbon(data=Lpond_envi, aes(x=r, ymin = envLo, ymax = envHi), alpha=.3)+
+  geom_hline(yintercept=0, linetype="dashed", color = "red")+
+  xlab("r") + ylab("L(r)-r")+
+  theme_few()
+
+plot_grid(Pdist_plot,Pliso_plot, labels="AUTO", rel_heights = c(1,1))
+```
+
+## Simulated data
+**9. Examine the spatial dispersion of three simulated point distributions (Poisson, uniform, and clustered). Include the point-wise confidence envelope plots at � level of 0.01 for the L-function with isotropic correction. In which distribution(s) do you see complete spatial randomness (CSR)? Include a 3 by 2 plot of the point locations and L-function with envelope (See example: q9_example_plot_sample_blank-01.png) (4 pts).**  
+
+* Complete spatial randomness is most evident in the poisson distribution. This makes sense because the poisson distribution is the literal definition of complete spatial randomness. In the regular dataset there is repulsion evident at short lags with the L-estimate curve far below the envelope for much of the graph. In the clustered dataset there is clustering at short lags as shown by the L-estimate curve far exceeding the envelope for much of the graph.  
+
+```{r}
+### Examine the spatial dispersion of simulated point distributions
+
+#######################################
+######### poisson distribution ########
+set.seed(42)
+pois_dis <- rpoispp(100)
+
+# Calculate L-estimates and Monte Carlo envelopes for the poisson dataset
+Lpois <- Lest(pois_dis, correction="isotropic")
+Lpois_env <- envelope(pois_dis, Lest, nsim=99, rank=.5, correction="isotropic", global=F)
+Lpois_env <- dplyr::mutate(Lpois_env, norm = obs-r)
+Lpois_env <- dplyr::mutate(Lpois_env, envHi = hi-r)
+Lpois_env <- dplyr::mutate(Lpois_env, envLo = lo-r)
+
+pois_lenv_plot <- ggplot()+
+  geom_line(data = Lpois_env, aes(x=r, y=norm), cex=1)+
+  geom_ribbon(data=Lpois_env, aes(x=r, ymin = envLo, ymax = envHi), alpha=.3)+
+  geom_hline(yintercept=0, linetype="dashed", color = "red")+
+  xlab("r") + ylab("L(r)-r")+
+  theme_few()
+
+#######################################
+######## regular distribution #########
+set.seed(1)
+regu_dis <- rSSI(0.09, 70)
+
+# Calculate L-estimates and Monte Carlo envelopes for the regular dataset
+Lregu <- Lest(regu_dis, correction="isotropic")
+Lregu_env <- envelope(regu_dis, Lest, nsim=99, rank=.5, correction="isotropic", global=F)
+Lregu_env <- dplyr::mutate(Lregu_env, norm = obs-r)
+Lregu_env <- dplyr::mutate(Lregu_env, envHi = hi-r)
+Lregu_env <- dplyr::mutate(Lregu_env, envLo = lo-r)
+
+regu_lenv_plot <- ggplot()+
+  geom_line(data = Lregu_env, aes(x=r, y=norm), cex=1)+
+  geom_ribbon(data=Lregu_env, aes(x=r, ymin = envLo, ymax = envHi), alpha=.3)+
+  geom_hline(yintercept=0, linetype="dashed", color = "red")+
+  xlab("r") + ylab("L(r)-r")+
+  theme_few()
+#######################################
+####### clustered distribution ########
+set.seed(21)
+clus_dis <- rMatClust(30, 0.05, 4)
+
+# Calculate L-estimates and Monte Carlo envelopes for the regular dataset
+Lclus <- Lest(clus_dis, correction="isotropic")
+Lclus_env <- envelope(clus_dis, Lest, nsim=99, rank=.5, correction="isotropic", global=F)
+Lclus_env <- dplyr::mutate(Lclus_env, norm = obs-r)
+Lclus_env <- dplyr::mutate(Lclus_env, envHi = hi-r)
+Lclus_env <- dplyr::mutate(Lclus_env, envLo = lo-r)
+
+clus_lenv_plot <- ggplot()+
+  geom_line(data = Lclus_env, aes(x=r, y=norm), cex=1)+
+  geom_ribbon(data=Lclus_env, aes(x=r, ymin = envLo, ymax = envHi), alpha=.3)+
+  geom_hline(yintercept=0, linetype="dashed", color = "red")+
+  xlab("r") + ylab("L(r)-r")+
+  theme_few()
+```
+
+Distribution plots
+```{r}
+# Poisson
+pois_dist_plot <- ggplot()+
+  geom_point(data=as.data.frame(pois_dis), aes(x=x, y=y), colour="darkgreen")+
+  labs(y = "northing (no units)", x = "easting (no units)")+
+  theme_bw()+
+  theme(text = element_text(size=15))+
+  coord_equal()+
+  ggtitle(label = "Poisson distribution")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Regular
+regu_dist_plot <- ggplot()+
+  geom_point(data=as.data.frame(regu_dis), aes(x=x, y=y), colour="darkgreen")+
+  labs(y = "northing (no units)", x = "easting (no units)")+
+  theme_bw()+
+  theme(text = element_text(size=15))+
+  coord_equal()+
+  ggtitle(label = "Regular distribution")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#Clustered
+clus_dist_plot <- ggplot()+
+  geom_point(data=as.data.frame(clus_dis), aes(x=x, y=y), colour="darkgreen")+
+  labs(y = "northing (no units)", x = "easting (no units)")+
+  theme_bw()+
+  theme(text = element_text(size=15))+
+  coord_equal()+
+  ggtitle(label = "Clustered distribution")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r, fig.width=10,fig.height=7}
+plot_grid(pois_dist_plot, regu_dist_plot, clus_dist_plot, pois_lenv_plot,regu_lenv_plot,clus_lenv_plot, nrow=2, ncol=3)
+```
+
+
+

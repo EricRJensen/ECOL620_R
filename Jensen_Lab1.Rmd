@@ -1,0 +1,310 @@
+---
+title: "Lab1Report"
+author: "Eric Jensen"
+date: "January 23, 2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **Lab Assignment #1:** Introduction to R for Spatial Exploration
+
+```{r}
+library(ggplot2)
+library(usmap)
+library(dplyr)
+library(tidyverse)
+library(mapproj)
+library(wesanderson)
+library(ggthemes)
+library(sf)
+library(ggrepel)
+library(viridis)
+library(SparkR)
+```
+
+### Define R Functions
+1. Briefly describe (1-2 sentences) what each of the following functions achieve. All of
+these functions are seen throughout the coding exercise. (1/4 pt each).
+**c()** - The concatenate function combines multiple elements (strings, integers, floats, etc.) into a single vector.
+**seq()** - The sequence function can be used to make a vector of consistently increasing values. The first argument is the starting value, the second argument is the ending value, and the third argument is the increment by which the sequence increases.
+**rep()** - The replicate function produces vectors of repeating values. The repeating values can be a sequence of integers, or simply a single repeating values. It can also be used to repeat lists, datetime objects, etc.
+**aggregate()** - The aggregate function is used to collapse data by like-values in a given column. Because the function reduces the number of rows, it requires a function to reduce the collapsed rows by, for example, the mean function could be used for columns of numeric data.
+**cbind.data.frame()** - Column bind binds columns from different dataframes into a single dataframe. It requires that the two dataframes being bound together have the same number of rows so that there is not a mismatch of column lengths.
+**subset()** - The subset function can be used to subset data in an object by columns (using the select argument) or by rows (using the subset argument). The subset argument requires a logical expression to subset by.
+**coord_map()** - The coord_map function is used to project spatial data as part of the mapproj package to be used in ggplot2 plots. It can be used to set projections and extents of spatial data maps.
+**plot_grid()** - Plot grid seems *much handier* than par(mfrow) for creating composites of multiple plots in a single layout.
+
+### Sample script for building maps in ggplot2
+```{r}
+#Within R, there are some datasets we can manipulate and plot
+states<-as.data.frame(state.x77)
+states$region <- tolower(rownames(states))
+
+#ggplot has some map data too
+states_map <- map_data("state")
+
+#Which states are represented? 
+unique(states_map$region)
+
+#Let's merge the two datasets. this integrates the "states" data with the spatial information from each state
+fact_join=left_join(states_map, states, by = "region")
+
+#life expectancy in years (1969–71)
+life_expectancy=ggplot(fact_join, aes(long, lat, group = group))+
+  geom_polygon(aes(fill = `Life Exp`), colour = "white")+
+  scale_fill_viridis_c(option = "D")+
+  theme_classic()+
+  coord_map("bonne", lat0 = 40)+
+  labs(y = "Latitude", x = "Longitude", fill="Life\nExpectency")+
+  theme(legend.position = "bottom")
+print(life_expectancy)
+
+#murder and non-negligent manslaughter rate per 100,000 population (1976)
+murder=ggplot(fact_join, aes(long, lat, group = group))+
+  geom_polygon(aes(fill = Murder), color = "white")+
+  scale_fill_viridis_c(option = "C")+
+  theme_classic()+
+  coord_map("bonne", lat0 = 40)+
+  labs(y = "Latitude", x = "Longitude", fill="Manslaughter rate\nper 100,000 people") +
+  theme(legend.position = "bottom") 
+print(murder)
+```
+
+### US Maps
+2. Using the existing code, map a plot of the contiguous United States representing the
+area of each state. Attach your plot and add “Area of US States” to the title. (2 pts.)
+3. Using your code from Question #2, make three additional plots (of the same data).
+Each map should use a different color scale and geographic projection. Include
+suitable titles. Use the plot_grid function to make a three-panel horizontal plot (4
+pts.)
+
+#### Response for question 2
+```{r}
+# State areas
+area1=ggplot(fact_join, aes(long, lat, group = group))+
+  ggtitle("Areas of US States | Bonne Projection")+
+  geom_polygon(aes(fill = Area), color = "white")+
+  scale_fill_continuous(type = "viridis",breaks = c(50000, 150000, 250000),labels = c('50', '150', '250'))+
+  theme_few()+
+  coord_map("bonne", lat0 = 40)+
+  labs(y = "Latitude", x = "Longitude", fill="Area in sq. miles (thousands)") +
+  theme(legend.position = "bottom") 
+print(area1)
+```
+
+#### Response for question 3
+```{r}
+# State areas projection #1
+area2=ggplot(fact_join, aes(long, lat, group = group))+
+  ggtitle("Areas of US States | Mercator Projection")+
+  geom_polygon(aes(fill = Area), color = "white")+
+  scale_fill_gradient(breaks = c(50000, 150000, 250000),labels = c('50', '150', '250'))+
+  theme_few()+
+  coord_map()+
+  labs(y = "Latitude", x = "Longitude", fill="Area in sq. miles (thousands)") +
+  theme(legend.position = "bottom") 
+print(area2)
+```
+
+```{r}
+# State areas projection #2
+area3=ggplot(fact_join, aes(long, lat, group = group))+
+  ggtitle("Areas of US States | Conic Projection")+
+  geom_polygon(aes(fill = Area), color = "white")+
+  scale_fill_gradient(breaks = c(50000, 150000, 250000),labels = c('50', '150', '250'),low = "blue", high = "red")+
+  theme_few()+
+  coord_map("conic", lat0 = 30)+
+  labs(y = "Latitude", x = "Longitude", fill="Area in sq. miles (thousands)") +
+  theme(legend.position = "bottom") 
+print(area3)
+```
+
+```{r}
+# State areas projection #3
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+area4=ggplot(fact_join, aes(long, lat, group = group))+
+  ggtitle("Areas of US States | Orthographic Projection")+
+  geom_polygon(aes(fill = Area), color = "white")+
+  scale_fill_gradientn(colours = pal, breaks = c(50000, 150000, 250000),labels = c('50', '150', '250')) +
+  theme_few()+
+  coord_map("orthographic")+
+  labs(y = "Latitude", x = "Longitude", fill="Area in sq. miles (thousands)") +
+  theme(legend.position = "bottom") 
+print(area4)
+```
+
+```{r}
+#Create plot layout
+#This is used to make aggregate plots. You could change 
+library(cowplot)
+gridded_plot=plot_grid(area2,area3,area4, labels = NULL, nrow=1)
+print(gridded_plot)
+#The following will save a PNG to the directory of choice. You will have to define your own directory. 
+#png(file="lab1/gridded_plot.png",  width=15, height=5, bg="white", units="in", res= 300)
+#print(gridded_plot)
+#dev.off()
+```
+
+Remove objects accumulated to this point
+```{r}
+#remove(fact_join, gridded_plot, life_expectancy,murder,states, states_map, area1, area2, area3, area4, states, states_map, pal)
+################################################################################
+```
+
+###US University Data
+4. Use the existing code to only plot the Colorado schools within the top 95th quantile of
+total student enrollment. Use the following line of code to add point labels. This function
+is in the ggrepel library. (3 pts.)
+geom_text_repel(data=q95_schools, aes(label=NAME, x=LON, y = LAT),
+force=20, size=3)
+5. If you went to another university (outside of Colorado), plot that state (if in the US) and
+the universities that reside in it. If you haven’t gone to another school (outside of
+Colorado), pick a state where you’d like to study, post-doc, or gain employment. For
+this map, include a county-level shapefile (you’ll need to find this on your own). Lastly,
+highlight your alma mater (in red) or future university where you’d like to reside (in
+orange). Scale the size of the points by “INST_SIZE”. Put the name of the institution in
+the plot title. See my example, from New York, for reference (“ny_plot.png”). (9 pts.)
+
+```{r}
+library(sp)      # Functions to work with shapefiles and KML files
+library(rgdal)   # Functions to work with shapefiles and KML files
+
+#read a file containing US college and university geographic information
+us_uni_csv=read_csv('C:/Users/erjensen/Documents/ECOL620/Lab1/data_for_lab1/colorado_universities.csv')
+
+#subset to CSU
+#subset(us_uni_csv, NAME=="Colorado State University") #baseR
+dplyr::filter(us_uni_csv, NAME=="Colorado State University") #tidyverse
+
+#subset to Colorado
+#colorado_universities=subset(us_uni_csv, LSTATE=="CO") #baseR
+colorado_universities=dplyr::filter(us_uni_csv, LSTATE=="CO") #tidyverse
+
+# #how many schools? 
+# nrow(colorado_universities)
+# 
+# #Explore some simple statistics on total enrollment
+# #See for https://www.sciencebase.gov/catalog/file/get/4f4e4acee4b07f02db67fb39?f=5a%2F36%2Ff2%2F5a36f2b513954b454d52eea972c0d33ea13f439a&transform=1&allowOpen=true
+# #for more information on the variables. Not you may need this link for question 5 (e.g., levels of "INST_SIZE") . 
+# ggplot()+
+# geom_histogram(data=colorado_universities, aes(TOT_ENROLL), bins = 50, fill="darkgreen")+
+# theme_classic()+
+# labs(y = "# of Universities", x = "Total Enrollment")
+# 
+# range(colorado_universities$TOT_ENROLL)
+# mean(colorado_universities$TOT_ENROLL)
+# 
+# #Write a .csv of just the Colorado college and universities
+# #write.csv(us_uni_csv, "data_for_lab1/Colleges_and_Universities/colorado_universities_test.csv", row.names=F) #baseR
+# write_csv(us_uni_csv, "lab1/CSVs/colorado_universities_test.csv") #tidyverse
+# 
+# #Let's make a shapefile of the locations
+# colorado_universities_shp=colorado_universities
+# coordinates(colorado_universities_shp)=~LON+LAT
+# proj4string(colorado_universities_shp)= CRS("+proj=longlat +datum=WGS84")
+# 
+# #Plot the points
+# plot(colorado_universities_shp) #not very impressive...
+# 
+# #Read a shapefile 
+# us_uni <- readOGR("lab1/data_for_lab1/Colleges_and_Universities/CollegesUniversities.shp")
+# 
+# #Subset to Colorado
+# colorado_universities=subset(us_uni, LSTATE=="CO")
+
+# plot(colorado_universities) #Should be the same as above
+# 
+# #Read the colorado county shapefile
+co_counties= read_sf('C:/Users/erjensen/Documents/ECOL620/lab1/data_for_lab1/counties/Colorado_County_Boundaries.shp') #this might take a couple of seconds to load
+# 
+# library(ggplot2)
+# library(viridis)
+# #let's plot just the schools with enrollement over 1000 students
+# colorado_universities=subset(colorado_universities, TOT_ENROLL>1000)
+# colorado_universities=as.data.frame(colorado_universities)
+# 
+# #let's determine the range and save the valeus. We use these below for plotting
+# min_enroll=min(colorado_universities$TOT_ENROLL)
+# max_enroll=max(colorado_universities$TOT_ENROLL)
+# 
+# #use ggplot to map a state map
+# CO_MAP_UNI=ggplot() +
+#   geom_polygon(data = co_counties, aes(x=long, y = lat, group = group), fill = NA, color ="black", lwd=.1) +
+#   geom_point(data = colorado_universities, aes(x=LON, y = LAT, size=TOT_ENROLL, colour=TOT_ENROLL), alpha=.9) +
+#   coord_map("bonne", lat0 = 40)+
+#   theme_bw()+
+#   theme(panel.grid.minor=element_blank(),panel.grid.major=element_blank())+
+#   theme( panel.border=element_blank())+
+#   scale_color_viridis(limits=c(min_enroll, max_enroll), breaks=seq(5000, 30000, by=5000), name = "Total\nenrollment")+
+#   guides(color= guide_legend(), size=guide_legend())+
+#   scale_size_continuous(limits=c(min_enroll, max_enroll), breaks=seq(5000, 30000, by=5000),name = "Total\nenrollment")+
+#   labs(y = "Latitude", x = "Longitude")
+# print(CO_MAP_UNI)
+# png(file="lab1/PNGs/CO_MAP_UNI.png",  width=6, height=4, bg=NA, units="in", res= 300)
+# print(CO_MAP_UNI)
+# dev.off()
+```
+
+### Question 4 response
+```{r}
+# Select Colorado universities within the top 95th percentile of student enrollment
+co_universities_pct =  dplyr::mutate(colorado_universities, PCT = dplyr::ntile(TOT_ENROLL, 100)) 
+# calculate percentiles for each school based on total enrollment
+co_universities_95pct = co_universities_pct %>%
+  dplyr::filter(co_universities_pct$PCT >= 95)
+
+min_enroll=min(colorado_universities$TOT_ENROLL)
+max_enroll=max(colorado_universities$TOT_ENROLL)
+
+co_universities_95pct_plot = co_universities_95pct %>%
+  ggplot() +
+  geom_sf(data=co_counties)+
+  coord_sf()+
+  geom_point(data=co_universities_95pct, aes(x=LON, y = LAT, size=TOT_ENROLL, colour=TOT_ENROLL), alpha=.9) +
+  theme_few()+
+  theme(panel.grid.minor=element_blank(),panel.grid.major=element_blank())+
+  theme(panel.border=element_blank())+
+  scale_color_viridis(limits=c(min_enroll, max_enroll), breaks=seq(5000, 30000, by=5000), name = "Total\nenrollment", labels = c('Under 5000', '5000-9999', '10000-14999', '15000-19999', '20000-24999', '25000-29999'))+
+  guides(color= guide_legend(), size=guide_legend())+
+  scale_size_continuous(limits=c(min_enroll, max_enroll), breaks=seq(5000, 30000, by=5000),name = "Total\nenrollment", labels = c('Under 5000', '5000-9999', '10000-14999', '15000-19999', '20000-24999', '25000-29999'))+
+  geom_text_repel(aes(label=NAME, x=LON, y = LAT),force=20, size=3)+
+  ggtitle('95th Percentile of Enrollment of Colorado Universities')+
+  labs(y = "Latitude", x = "Longitude")
+print(co_universities_95pct_plot)
+```
+
+### Question 5 response
+```{r}
+#Filter for universities in my home state of Washington, Western Washington University Vikings through-and-through!
+washington_universities = us_uni_csv %>%
+  dplyr::filter(LSTATE=="WA") %>%
+  dplyr::mutate(WWU = NAME == "Western Washington University")
+
+# Import Washington counties shapefile as simplefeatures
+wa_counties <- read_sf('lab1/data_for_lab1/Wa_County_Boundaries/WA_County_Boundaries.shp')
+
+# Get minimum and maximum enrollment values
+min_enroll=min(washington_universities$TOT_ENROLL)
+max_enroll=max(washington_universities$TOT_ENROLL)
+
+WA_MAP_UNI=washington_universities %>%ggplot() +
+  geom_sf(data= wa_counties) +
+  coord_sf() +
+  ggtitle('Western Washington University')+
+  geom_point(data = washington_universities, aes(x=LON, y = LAT, size=TOT_ENROLL, colour=TOT_ENROLL), alpha=.9)+
+  geom_point(data = washington_universities %>% filter(WWU == TRUE), aes(x=LON, y = LAT, size=TOT_ENROLL),colour='red', alpha=.9, show.legend = FALSE)+
+  scale_size_continuous(limits=c(min_enroll, max_enroll),range = c(1,12), breaks=seq(6000, 36000, by=6000),name = "Total\nenrollment", guide = guide_legend())+
+  scale_color_viridis(limits=c(min_enroll, max_enroll), breaks=seq(6000, 36000, by=6000), name = "Total\nenrollment", guide = guide_legend())+
+  theme_few() +
+  theme(panel.grid.minor=element_blank(),panel.grid.major=element_blank())+
+  theme(panel.border=element_blank())+
+  labs(y = "Latitude", x = "Longitude")
+print(WA_MAP_UNI)
+```
+

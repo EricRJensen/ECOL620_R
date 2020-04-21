@@ -1,0 +1,387 @@
+---
+title: 'Quantifying Spatial Pattern in Ecological Data: Scale'
+author: "Eric Jensen"
+date: "January 29, 2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(raster)
+library(cowplot)
+library(rgdal)
+library(ggthemes)
+library(mapproj)
+library(maptools)
+library(USAboundaries)
+library(Hmisc)
+library(corrplot)
+library(PerformanceAnalytics)
+```
+
+## **Initial Tasks**
+### **Question 1**
+**1. Briefly describe (1-2 sentences) what each of the following functions achieve throughout the coding exercise. (1/4 pt each).**  
+-**crop():** The raster::crop function subsets a raster dataset based on an extent object or on an object from which an extent object can be created.  
+-**extend():** The raster::extend function creates a raster for x with a larger geographic extent based on extent object (or similar object) y. Because the raster is being extended, the user must provide a value for the new cells.  
+-**disaggregate():** The raster::disaggregate function downscales a raster object, increasing the resolution of the input. The user must provide a method for downscaling--typically bilinear interpolation.  
+-**aggregate():** The raster::aggregate upscales a raster object, decreasing the resolution of the input. The user provides a scaling factor to aggregate by which expresses the number of cells in each direction to be aggregated over.
+-**cellStats:()** The raster::cellStats function allows the user to calculate statistics over the entire raster object. The user provides a statistical function as the *stat* argument which can include mean, median, variance, count, standard deviation, etc.  
+-**mask():** The raster::mask function returns a raster object that has similar pixel values to the original image but has pixels removed based on the mask that is applied. The function returns all of the pixels in the original image which are NA in the mask.  
+-**res():** The raster::res function returns the resolution of the input raster.  
+-**gBuffer():** The rgeos:gBuffer function expands the area of existing vector data stored in sp objects. The user defines a width to expand the original geometry.  
+
+### **Question 2**
+**2. Create a 20 by 20 raster using the Poisson distribution to randomly draw the values. Design the raster to have a mean and variance of 5 (approximately). Insert a figure of the raster with cell values labeled (e.g., follow the aesthetic of Figure 2.5a). Include code to generate the raster and figure. For this example, use the supplied raster plotting code (don’t worry about ggplot, yet). Report the mean and variance of the newly generated raster. (1 pt)**
+
+```{r}
+set.seed(16)#sets random number seed for repeatability
+toy <- raster(ncol=20, nrow=20, xmn=1, xmx=20, ymn=1, ymx=20)
+values(toy) <- rpois(ncell(toy), lambda=5)
+ncell(toy)
+plot(toy)
+text(toy, digits=2)
+
+toy_mean <- cellStats(toy, mean)
+toy_var <- cellStats(toy, var)
+```
+
+The mean is **`r toy_mean`** and variance is **`r toy_var`**--similar to the lambda of 5
+
+```{r}
+remove(toy, toy_mean, toy_var)
+```
+
+### **Question 3**
+**3) Use the following line of code to download a digital elevation raster of the southern Colorado Area**
+
+```{r}
+#Comment out getData after downloading in order to knit
+#srtm <- getData('SRTM', lon=-106, lat=39, path = 'lab2') #this might take a minute to download
+srtm <- raster('C:/Users/erjensen/Documents/ECOL620/lab2/data_for_lab2/srtm_15_05.tif')
+```
+
+**Aggregate (using the mean) the elevation raster by factors of 5, 30, 55, 80, …255. Plot the spatial grain versus spatial variance, using a log scale. Describe the relationship between the two variables. (4 points)**
+
+```{r}
+#Comment once this has run for knitting
+plot_data_all = data.frame()
+par(mfrow=c(6,2), mar=c(1,1,1,1))
+for(i in seq(5,255,25)){
+  raster = aggregate(srtm, fact = i, fun=mean)
+  res_for_plot = res(raster)[1]
+  var_for_plot = cellStats(raster, var)
+  factor_for_plot = i
+  plot(raster)
+  columns_of_data = cbind(res_for_plot,var_for_plot,factor_for_plot)
+  plot_data_all = rbind(columns_of_data, plot_data_all)
+  }
+
+#x-scale should be from 5-2)
+#y-scale should be ~12
+ggplot()+
+   geom_point(data = plot_data_all, aes(x = res_for_plot, y = var_for_plot, size = factor_for_plot, color =
+                                          factor_for_plot),shape = 0)+
+   theme_few()+
+   scale_x_log10() +
+   scale_y_log10(breaks = c(260000, 270000, 280000,290000, 300000))+
+   guides(color= guide_legend('Factor of aggregation'), size=guide_legend('Factor of aggregation'))+
+   labs(y = "Log (spatial variance)", x = "Log (grain)")
+
+par(mfrow=c(1,1))
+```
+
+```{r}
+remove(factor_for_plot, i, columns_of_data, plot_data_all, res_for_plot, var_for_plot,raster)
+```
+
+
+### **Question 4**
+**Include a plot of the elevation raster disaggregated by a factor of 55 using ggplot. Please include a state overlay (see code from Lab #1 for state data, i.e., Line 57). If you use a projection, ggplot will take longer to process the image. Re-projecting the data is not necessary for this exercise. (3 points)**
+
+```{r}
+srtm_55 <- aggregate(srtm, fact=55, method='bilinear')
+srtm_55_matrix <- rasterToPoints(srtm_55)
+srtm_55_tibble <- as_tibble(srtm_55_matrix) # Convert SRTM data to a dataframe for mapping in ggplot
+colnames(srtm_55_tibble) <- c("X","Y","DEM")
+
+# Import states data
+states_map <- map_data("state")
+
+# Plot the SRTM data in ggplot
+DEM_map <- ggplot()+
+  #geom_tile(data = srtm_55_tibble, aes(x=X,y=Y,colour=DEM),alpha=.5)+
+  geom_raster(data = srtm_55_tibble, aes(x = X, y = Y, fill = DEM))+ # I was having issues with the boxes around the rastercells for geom_tile() so I       went with geom_raster
+  geom_polygon(data = states_map, aes(x=long, y=lat),color='black', alpha = .0)+
+  coord_cartesian(xlim = c(extent(srtm_55)[1], extent(srtm_55)[2]), ylim = c(extent(srtm_55)[3], extent(srtm_55)[4]))+
+  theme_few()+
+  scale_fill_gradientn(colours = terrain.colors(10),breaks = seq(1500,3500,500),name = "Elevation (m)")+
+  labs(y="Latitude", x="Longitude")
+  #guides(fill = guide_legend('Elevation (meters)'))
+print(DEM_map)
+
+# For some reason, however, my states are....psychedelic
+# I will try using geom_sf in the ggplot with a different states spatial file that I have used before from the USAboundaries package
+states <- us_states()
+class(states)
+
+DEM_map_sf <- ggplot()+
+  geom_raster(data = srtm_55_tibble, aes(x = X, y = Y, fill = DEM))+
+  geom_sf(data=states, mapping = aes(),alpha=.5)+
+  coord_sf(xlim = c(extent(srtm_55)[1], extent(srtm_55)[2]), ylim = c(extent(srtm_55)[3], extent(srtm_55)[4]))+ #replace coord_cartesian() w/ coord_sf()
+  theme_few()+
+  scale_fill_gradientn(colours = terrain.colors(10),breaks = seq(1500,3500,500),name = "Elevation (m)")+
+  labs(y="Latitude", x="Longitude")
+print(DEM_map_sf) #Success!
+```
+
+Note: The cleaner plot seems to have a more accurate spatial reference (preserving measurements and direction) because the longitude degrees are narrower than the latitude, reflecting the converging longitude lines when moving farther north.
+
+```{r}
+remove(states, states_map, srtm_55_matrix, srtm_55_tibble, DEM_map, DEM_map_sf, srtm55)
+```
+
+## **Five-lined Skink Data (multi-scale analysis)**
+### **Question 5**
+**5. Once you have cropped raster “nlcd” using a 10km barrier from the min and maxcoordinates of the reptile sampling locations (Lines 149-156), how many cells remain? Whatpercent reduction did you see from the original raster? (1 pts)**
+
+```{r}
+nlcd<-raster("C:/Users/erjensen/Documents/ECOL620/lab2/data_for_lab2/nlcd2011SE")
+
+#check raster values
+nlcd <- as.factor(nlcd) #convert to factors, this may take a little while... (~1-2 mintues)
+nlcd_proj <- projection(nlcd)
+
+#Read in sites data
+sites <- readOGR("C:/Users/erjensen/Documents/ECOL620/lab2/data_for_lab2/reptiledata/reptiledata.shp")
+proj4string(sites) <- nlcd_proj #set projection
+
+#subset points to remove corn land use
+sites <- subset(sites, management!="Corn")
+nrow(sites)
+
+#plot with custom color scheme
+#par(mfrow = c(1,1))
+# my_col <- c("black","blue","darkorange","red","darkred","grey30","grey50", "lightgreen",
+#             "green", "darkgreen", "yellow", "goldenrod", "purple", "orchid","lightblue", "lightcyan")
+#
+# plot(nlcd, col=my_col, axes=F, box=F)
+# plot(sites, add=T)
+```
+
+```{r}
+#crop raster to 10 km from sampling points: determine min/max coordinates for new extent
+x.min <- min(sites$coords_x1) - 10000
+x.max <- max(sites$coords_x1) + 10000
+y.min <- min(sites$coords_x2) - 10000
+y.max <- max(sites$coords_x2) + 10000
+
+extent.new <- extent(x.min, x.max, y.min, y.max)
+nlcd_new <- crop(nlcd, extent.new) #this may take ~20 seconds
+#plot(nlcd_new)
+
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+
+# Calculate the number of cells that remain
+remaining_cells <- ncol(nlcd_new)*nrow(nlcd_new)
+# Calculate the percent reduction
+percent_reduction <- percent((ncol(nlcd_new)*nrow(nlcd_new))/(ncol(nlcd)*nrow(nlcd)))
+```
+
+**Answer to question 6:** There are **`r remaining_cells` cells** remaining after the reduction, which is **`r percent_reduction`** of the original pre-reduction total of cells.
+
+```{r}
+remove(x.min, x.max, y.min, y.max, extent.new, srtm_55,nlcd_proj,my_col)
+```
+
+Reclassify the NLCD data into a binary map of forests (1) and non-forests(0)
+
+```{r}
+#create a binary forest layer using nlcd as template
+forest <- nlcd_new
+#sets all the values of forest to zero
+values(forest) <- 0 #set to zero
+
+#reclassify with reclassify function -- faster
+#levels(nlcd)[[1]]
+reclass <- c(rep(0,7), rep(1,3), rep(0,6))
+nlcd.levels <- levels(nlcd)[[1]]
+
+#create reclassify matrix: first col: orginal; second: change to
+reclass.mat <- cbind(levels(nlcd)[[1]], reclass)
+#reclass.mat
+
+#reclassify
+forest <- reclassify(nlcd, reclass.mat)
+
+#plot
+#plot(forest)
+```
+  
+### **Question 6**
+**Using intervals of 500 m and a maximum range of 5000 m (minimum range of 500 m), where do you see the greatest correlation in each pairwise combination of scales? Is this surprising? Plot the scatter plot of the greatest pair-wise correlation combination. See Figure 2.9 for an example of many similar pairwise plots. (3 pts)**
+
+```{r}
+#Create a dataframe with the site names to populate with forest cover calcuations in for loop below
+site = sites$site
+forest_df = tibble(site)
+buffer_seq = seq(500,5000,500)
+# View(forest_df)
+
+#Populate the forest_df dataframe with forest cover information for each plot at the eleven buffer values
+for (i in buffer_seq){
+  N=length(sites)
+  forest_vector <- vector()
+
+  for(j in seq_along(sites)){
+    buffered <- buffer(sites[j,], width = i)
+
+    #calculate percent forest cover
+    grainarea <- res(forest)[[1]]^2/10000#in ha
+    bufferarea <- (3.14159*i^2)/10000#pi*r^2
+
+    buffer.forest <- crop(forest, buffered)
+    buffer.forest <- raster::mask(buffer.forest, buffered)
+
+    forestcover <- cellStats(buffer.forest, 'sum')*grainarea
+    percentforest <- forestcover/bufferarea*100
+
+    forest_vector[[j]] <-percentforest   }
+
+  forest_tib = tibble(forest_vector)
+  colnames(forest_tib)[1] <- paste('buff',as.character(i), sep='')
+  forest_df = cbind(forest_df,forest_tib[1])
+  }
+
+```
+
+```{r}
+remove(i, j, forestcover, percentforest, forest_vector, buffer.forest, grainarea, bufferarea, buffered,
+       buffer_seq, reclass.mat, forest_tib, nlcd.levels, site, nlcd)
+```
+
+Produce correlation matrix plots for each of the buffered forest cover vectors
+
+```{r results="hide"}
+# Unlist forest items and convert to matrix (excluding sitenames) for calculating correlation matrix
+forest_df[2:11] <- unlist(forest_df[2:11])
+forest_matrix = as.matrix(forest_df[,2:11])
+View(forest_matrix)
+
+# Function to produce dataframe with correlation coefficients for plotting
+# cormat : matrix of the correlation coefficients
+# pmat : matrix of the correlation p-values
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )}
+
+# Apply rcorr function to create a correlation dataframe to run through above function
+corr_df<-rcorr(forest_matrix)
+flattenCorrMatrix(corr_df$r, corr_df$P)
+```
+
+```{r}
+# Test that function is working properly by calculating correlation coefficient for 500 m and 1000 m buffers
+cor(forest_matrix[,1], forest_matrix[,2]) #it matches the output in the correlation data frame
+
+# Create a correlation plot to assess the highest correlation
+corrplot(corr_df$r, type = "upper",
+         tl.col = "black", method='number', tl.srt = 45)
+
+# Because I found this cool package, plot a grid of all of the scatterplots along with the correlation coefficients
+forest_chart <- forest_df[, 2:11]
+chart.Correlation(forest_chart, histogram=TRUE, pch=19, method='pearson')
+```
+
+```{r}
+# Create GGplot of the forest cover for 4500m and 5000m buffers, with the highest correlation of .9975
+high_corr_df <- forest_df[10:11] #Subset to columns of interest
+ggplot()+
+  geom_point(data = high_corr_df, aes(x=buff4500, y=buff5000))+
+  theme_classic()+
+  labs(y = " Forest cover surrounding sample location at 5 km (%)", x = " Forest cover surrounding sample location at 4.5 km (%))")
+```
+
+### **Question 7**
+**7) Generate Figure 2.11 (only panels a and b) using ggplot. Use 500 m intervals and a maximum range of 5000 m (minimum range of 500 m). What does this suggest about the scale of drivers of occurrence for five-lined skinks? Where is the strongest association? How does your conclusion differ (or not) from the results of Fletcher and Fortin? Do you believe the scale of effect has been captured by the scales sampled? (6 pts)**
+
+```{r results="hide"}
+#----------------------------------------#
+#2.3.4.2 Buffer analysis
+#----------------------------------------#
+
+#herp data
+flsk <- read.csv("C:/Users/erjensen/Documents/ECOL620/lab2/data_for_lab2/reptiledata/reptiles_flsk.csv", header=T)
+#join presence/absence herp data to forest_df
+flsk_forest <- flsk %>% left_join(forest_df, by = "site") %>% drop_na()
+
+#loop over the buffer columns and create dataframe output for log likelihoods and confidence interval values
+buffnames <- colnames(flsk_forest[3:12])
+loglik_df = tibble()
+pres.buff <- glm(flsk_forest$pres ~ as.matrix(flsk_forest[5]), family = "binomial")
+for (i in seq(3,12,1)){
+
+  buffname = buffnames[i-2]
+  buff_val = as.numeric(substr(buffname,5,8))
+  #glms at 2 scales; see text for more scales considered
+  pres.buff <- glm(flsk_forest$pres ~ as.matrix(flsk_forest[i]), family = "binomial")
+
+  #get log likelihood value
+  logLik_buff <- logLik(pres.buff)
+  logLik_val <- logLik_buff[1] #log likelihood value
+
+  #get estimate of coefficient
+  coef_sum <- summary(pres.buff)
+  beta_est <- coef_sum$coefficients[2,1]
+
+  #get upper and lower confidence interval values
+  pres.ci <- confint(pres.buff)
+  print(pres.ci)
+  ci.025 <- pres.ci[2,1] #.025 CI value
+  ci.975 <- pres.ci[2,2] #.975 CI value
+
+  columns_of_data = cbind(buff_val, logLik_val, beta_est, ci.025, ci.975)
+  loglik_df = rbind(columns_of_data, loglik_df)
+}
+View(loglike_df)
+```
+
+```{r, fig.width=12,fig.height=6}
+# Create ggplot
+logLik_plot <- ggplot(data = loglik_df, aes(x = buff_val, y = logLik_val))+
+  geom_point()+
+  geom_line()+
+  scale_y_continuous(limits=c(-39.2, -31), breaks = c(-39,-37,-35,-33,-31))+
+  labs(y = "Log-likelihood", x = "Forest cover scale (m)")+
+  theme_few()
+
+# hint for beta plot
+beta_plot <- ggplot()+
+  geom_point(data = loglik_df, aes(x = buff_val, y = beta_est))+
+  geom_errorbar(data=loglik_df, aes(x = buff_val, ymin=ci.025, ymax=ci.975), colour="black",width=.1)+
+  scale_y_continuous(limits=c(0, 0.15), breaks = c(0.00,0.05,0.10,0.15))+
+  theme_few()+
+  labs(y = "beta (95% CI)", x = "Forest cover scale (m)")+
+  theme(text = element_text(size=15))
+
+gridded_plot=plot_grid(logLik_plot, beta_plot, labels = c('a','b'),nrow=1)
+print(gridded_plot)
+```
+
+**Reponse to questions about optimal FLSK scale:**
+The log likelihood values for the models suggest that the buffer of 1500 meters is the most likely model for five-lined skink (FLSK) presence based on the data. If this is true, it would indicate that 1500 meter radii are one of the scales relevant to FLSK habitat use. 
+
+Fletcher's interpretation of the coefficient is confusing. The coefficient of single variable logisitic regression represent the expexted change in log odds for a one unit increase in the predictor variable. In our case, the 1500 meter buffer represents an odds ratio of around 1.09, whereas the odds ratio for the 500 meter buffer is less than 1.05. That means that increases in forest cover at 1500 m have more of an influence on FLSK presence than increases in forest cover at 500 meters. The coefficients and log likelihoods both seem to converge on 1500 meters being the optimal scale in our example. [I used this document to help with interpretting the logistic regression coefficients.](https://rpubs.com/OmaymaS/182726)
+
+I do believe that scale of effect has been captured, at least for the local scale. Based on the trends in the charts, it seems unlikely that the log-likelihoods and beta coefficents would shoot up again at a smaller or larger ecological scale than the ones we have coverd. However, our model would likely start to hit limitations if we tried to predict presence over a region. This may be because our scale (and our one predictor variable) does not related to other drivers of habitat selection such as evolutionary history or seasonality of habitat, which could be more related to different scales and different predictors.
+

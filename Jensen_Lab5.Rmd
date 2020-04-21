@@ -1,0 +1,406 @@
+---
+title: 'Lab 5: Spatial Dependence and Autocorrelation'
+author: "Eric Jensen"
+date: "February 21, 2020"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(pgirmess)         #for simple correlograms; version 1.6.9 used
+library(ncf)              #for spline correlograms; version 1.2-5 used
+library(spdep)            #for general correlograms; version 0.7-8 used
+library(geoR)             #for variograms/kriging; version 1.7-5.2.1 used
+library(gstat)            #for variograms/kriging; version 1.1-6 used
+library(raster)           #for raster covariate data; version 2.6-7 used
+library(tidyverse)        #for everything
+library(ggthemes)         #for plotting in ggplot
+library(patchwork)        #for formatting multiple plots
+```
+
+***This lab assignment highlights the use of a number of R packages to explore differing techniques for assessing spatial dependence. Download Laboratory #5 materials and store files locally on your computer.***
+
+## **Assignment tasks (20 pts):**
+### Question 1
+**1) Describe the difference in the use of Moran'ss I and Ripley'ss K (or L-function). (1 pt)**  
+**Answer:** The most significant difference between Moran's I and Ripley's K is that Moran's I is a measure of spatial autocorrelation of the *marks* in a point pattern based on calculations at varying lag distances whereas Ripley's K is a measure of spatial clustering of *point locations* at varying lag distances. 
+
+### Question 2
+**2) Describe the difference between a correlogram and semivariogram. How the scales compare? (1 pt)**  
+**Answer:** As the name implies, semivariograms are rooted in variance and covariance, whereas Moran's I is related to the Pearson correlation coefficient. Semivariograms plot semivariance across lag distances, so at lag distances lower than the point at which the semivariogram curve reaches the sill, there is some amount of autocorrelation occurring.
+
+The scale on the x-axis of each are the lag in distance units of the spatial grid. The scale on the y-axis differs between the two. Correlogram y-axis values range from -1 (high variance between samples) to 1 (highly autocorrelated data), whereas semivariogram y-axis units are the semivariance of the dataset across different lag distances.
+
+### Question 3
+**3) Label the following semivariogram. (1 pt)**  
+![Semivariogram sample](C:/Users/erjensen/Documents/ECOL620/Lab5/AddToMarkdown.png)  
+**Answers:**    
+a) Nugget  
+b) Sill  
+c) Parial Sill  
+d) Range  
+
+## **Cactus data: Correlogram (Moran's I)**
+### Question 4
+**4) Generate a single plot containing the values from the three methods employed to generate correlograms (pgirmess, ncf, and spdep, e.g., see figure 5.5a from Fletcher and Fortin, also q4_morans_I.pdf). Be sure to use 2/3rd maximum distance to restrict the values. Color the points based on p-value significance (e.g., red<0.05, black>0.05). At what distance(s) do you see spatial autocorrelation? (4 pts).** 
+
+Prepare data for calculating correlograms
+```{r}
+#load data
+cactus<- read.csv('C:/Users/erjensen/Documents/ECOL620/Lab5/Jensen_lab5/data_for_lab5/cactus_matrix.csv', header=T)
+
+#calculate distance matrix
+coords <- cbind(cactus$x, cactus$y)
+colnames(coords) <- c("x", "y")
+distmat <- as.matrix(dist(coords))
+
+#Maximum distance to consider in correlogram/variogram (~1/2 to 2/3 total dist)
+maxdist <- 2/3*max(distmat)
+```
+
+Calculate correlograms
+```{r}
+###################################
+##### Correlog from pgirmess ######
+correlog.pgirmess <- pgirmess::correlog(coords, cactus$Height, method ="Moran", nbclass = 14, alternative = 'two.sided')
+
+# Create tibble for ggplot
+pgirmess_tbl = tibble(DistClass = correlog.pgirmess[,1], MoranI = correlog.pgirmess[,2], Pval = correlog.pgirmess[,3]) %>% mutate(package = 'pgirmess')
+remove(correlog.pgirmess)
+
+###################################################
+##### Correlogram with Monte Carlo test (NCF) #####
+correlog.ncf <- ncf::correlog(x = cactus$x, y = cactus$y, z =cactus$Height, increment = 5, resamp = 99)
+
+ncf_tbl = tibble(DistClass = unlist(correlog.ncf$mean.of.class), MoranI = unlist(correlog.ncf$correlation), Pval = correlog.ncf$p) %>% mutate(package = 'ncf')
+remove(correlog.ncf)
+
+##########################
+##### spdep correlog #####
+# make a neighborhood list:
+neigh <- dnearneigh(x = coords, d1 = 0, d2 = 3, longlat = F)
+wts <- nb2listw(neighbours = neigh, style = 'W', zero.policy = T)
+
+# First, create a df for storing data
+spdep_tbl <- tibble(DistClass = seq(5, 0.5 * max(distmat), by= 5), MoranI = NA, Null.LCL = NA, Null.UCL = NA, Pval = NA, package = NA)
+
+# Calculate Moran's I for lag distances  to populate the df
+for (i in 1:nrow(spdep_tbl)){
+          d.start <- spdep_tbl[i, "DistClass"] - 5
+          d.end <- spdep_tbl[i, "DistClass"]
+          neigh <- dnearneigh(x = coords, d1 = d.start, d2 = d.end, longlat = F)
+          wts <- nb2listw(neighbours = neigh, style = 'W', zero.policy= T)
+          mor.i <- moran.mc(x = cactus$Height, listw = wts, nsim = 99, zero.policy = T)
+          #summarize results from spdep
+          spdep_tbl[i, "DistClass"] <- (d.end + d.start)/2
+          spdep_tbl[i, "MoranI"] <- mor.i$statistic
+          spdep_tbl[i, "Null.LCL"] <- quantile(mor.i$res, p = 0.025)
+          spdep_tbl[i, "Null.UCL"] <- quantile(mor.i$res, p = 0.975)
+          spdep_tbl[i, "Pval"] <- mor.i$p.value
+          spdep_tbl[i, "package"] <- 'spdep'}
+remove(d.start,d.end,neigh,wts,mor.i,i)
+spdep_tbl <- select(spdep_tbl, c('DistClass','MoranI','Pval', 'package'))
+
+########################################
+##### Rowbind tibbles into long df #####
+correlong <- bind_rows(pgirmess_tbl,spdep_tbl,ncf_tbl) %>%
+  mutate(Pcolor = cut(Pval, 
+                      breaks = c(-Inf, 0.05, Inf),
+                      labels = c("Red", "Black"),
+                      right = TRUE))
+```
+
+Color the points based on p-value significance (e.g., red<0.05, black>0.05)
+
+Plot correlograms
+```{r}
+# Create plot of three methods
+ggplot(data = correlong, aes(x = DistClass, y = MoranI))+
+  geom_point(aes(shape = package), color = correlong$Pcolor, size = 3)+
+  geom_line(data = correlong, aes(x = DistClass, y = MoranI,color = package))+
+  geom_hline(yintercept=0)+
+  xlab("Distance (m)") + ylab("Moran's I")+
+  scale_y_continuous(breaks = seq(-.10, .30, by = .05))+
+  xlim(0,maxdist)+
+  theme_few()
+
+```
+
+```{r}
+remove(ncf_tbl, pgirmess_tbl,correlong,spdep_tbl, distmat)
+```
+
+**Answer:** There is spatial autocorrelation at lag distances of less than about 12 meters
+
+## **Cactus data: Semivariogram**
+### Question 5
+**5) Examine the empirical semivariogram created using gstat. Estimate the nugget, sill, and range. (1 pt)**
+
+```{r}
+# gstat semivariogram
+gstat.veg <- cactus
+coordinates(gstat.veg) <- ~x + y
+emp.gstat <- variogram(Height ~ 1, cutoff = maxdist, width =3, gstat.veg)
+plot(emp.gstat)
+```
+
+**Answer:**   
+Nugget: 800  
+Sill: 1300  
+Range: 500
+
+### Question 6
+**6) Do you see any cause for concern regarding anisotropy? (1 pt)**
+
+```{r}
+# examine anisotropy using directional semivariograms in gstat
+emp4.gstat <- gstat::variogram(Height ~ 1, cutoff = maxdist, alpha =c(0, 45, 90, 135), gstat.veg)
+plot(emp4.gstat)
+```
+
+**Answer:** Potentially, at lag distances between 10 and 20 meters in the 0 and 45 degree directions there appears to be a spike in the Moran's I values that may indicate a spatial relationship, possibly along some environmental gradient. The Fletcher text states that there is strong anisotropy.
+
+```{r}
+remove(emp4.gstat)
+```
+
+### Question 7
+**7) Plot the empirical and spherical theoretical semivariogram (through gstat). Add three colored lines to denote the nugget (blue), sill (green), and range (red). See example (q7_semivariogram.pdf (3 pts)**
+
+```{r}
+exp.gstat <- fit.variogram(emp.gstat, vgm("Exp"))
+
+# Get values of interest from the matrix produced by fit.variogram()
+exp_nug <- exp.gstat[1,2]
+exp_rng <- exp.gstat[2,3]
+exp_psl <- exp.gstat[2,2]
+exp_sil <- exp_nug+exp_psl
+
+# Get the line from the theoretical variogram
+exp_line = variogramLine(exp.gstat, maxdist= maxdist)
+
+ggplot()+
+  geom_point(emp.gstat, mapping = aes(x=dist,y=gamma,size=np))+
+  geom_line(exp_line, mapping=aes(x=dist,y=gamma))+
+  geom_hline(yintercept = exp_sil, color='green')+
+  geom_hline(yintercept = exp_nug, color='blue')+
+  geom_vline(xintercept = exp_rng, color='red')+
+  xlab("Distance (m)") + ylab("Semivariance")+
+  theme_few()
+```
+
+```{r}
+remove(exp_line,exp_nug,exp_psl,exp_rng,exp_sil)
+```
+
+### Question 8
+**8) Contrast the use of inverse distance weighting interpolation and kriging (using either spherical or exponential). Which method yields a better interpolation? Defend your choice analytically. (1 pts)**
+
+Initially I performed this analysis. However, I found that it didn't really compare the quality of the data against any sort of independent ground data.
+```{r}
+##### Compare kriging and inverse distance weighting interpolation in GStat #####
+# Build grid
+new.grid.1m <- expand.grid(x = 0:max(cactus$x), y =0:max(cactus$y))
+gridded(new.grid.1m) <- ~x + y
+
+# Ordinary kriging and Inverse distance weighting in gstat
+krig.gstat <- gstat::krige(Height ~ 1, gstat.veg, new.grid.1m, model = exp.gstat)
+idw.gstat <- idw(Height ~ 1, gstat.veg, new.grid.1m)#idp-the power used; default power=2
+
+#Correlation between idw and kriging in gstat
+#round(cor(cbind(gstat.exp=krig.gstat$var1.pred,gstat.idw=idw.gstat$var1.pred)), 3)
+```
+
+To better analyze the data and the two models, I wanted to test the predictions from kriging and inverse distance weighting against an independent validation set. I used 70% of the cactus datapoints as model training to produce kriged and IDW predictions and used the remaining 30% to validate the predictions. I then assessed the kriged and IDW predictions against the withheld height values to validate which model produced the highest correlation coeffiecients.
+
+```{r}
+# Withhold 30% of dataset for validation of the two models (IDW and krige) and keep 70% of the data for training
+set.seed(2020)
+cactus_id <- mutate(cactus, id = row_number()) # mutate ID column to subset by
+train_n = round(nrow(cactus_id)*.7) #calculate number of training points
+training = sample_n(cactus_id, train_n) #randomly sample the dataframe for the number of points needed
+validate = subset(cactus_id, !(id %in% training$id)) #create validation subset of all rows that are not in the training set (n = 203)
+
+# Create gstat (sp) objects from training and validation datasets
+coordinates(training) <- ~x + y
+coordinates(validate) <- ~x + y
+
+# Produce empirical exponential semivariograms for the training set
+emp.train <- variogram(Height ~ 1, cutoff = maxdist, width =3, training) #using Maxdist since the full dataset is still cactus
+exp.train <- fit.variogram(emp.train, vgm("Exp"))
+
+# Run Krige and IDW models over training
+krig.train <- gstat::krige(Height ~ 1, training, new.grid.1m, model = exp.train)
+idw.train <- idw(Height ~ 1, training, new.grid.1m)#idp-the power used; default power=2
+
+# # plot krigged and idw predictions
+# image(krig.train, main="krig estimates-training")
+# image(idw.train, main="idw estimates-training")
+
+# Convert to dataframe for calculating correlations against validation sets
+krig.train_df <- as.data.frame(krig.train)
+idw.train_df <- as.data.frame(idw.train)
+validate_df <- subset(cactus_id, !(id %in% training$id))
+
+# join dataframe into single dataframe for QA and for calculating correlations
+master_df <- validate_df%>%
+  left_join(krig.train_df, by = c('x', 'y')) %>%
+  rename(krig_pred = var1.pred) %>%
+  left_join(idw.train_df, by = c('x','y')) %>%
+  rename(idw_pred = var1.pred) %>%
+  select(-c(var1.var.x,var1.var.y))
+
+#Correlation between kriging and validation and idw and validation
+krig_cor <- round(cor(master_df$krig_pred,master_df$Height), 3)
+idw_cor <- round(cor(master_df$idw_pred,master_df$Height), 3)
+```
+
+**Answer:** Both inverse distance weighting and kriging are methods of interpolation. Inverse distance weighting is a strict weighted average that is applied across a raster grid based on known point data for a variable of interest. With Kriging, the analyst first fits a theoretical semivariogram to an empirical semivariogram. The theoretical semivariogram is then applied, also essentially as a weighted moving average, across the raster grid to predict a response variable continuously across a study area. 
+
+I was somewhat surprised that the correlation values were so similar. The kriged datset produced a correlation coefficient of `r krig_cor` and the inverse distance weighting produced a correlation coefficient value of `r idw_cor` against the actual dataset. Thus, the IDW model is *slightly* better. However, the quality values flip depending on the seed, which is used to determine the subsets of the training and validation data.
+
+```{r}
+remove(training,validate, idw.train, krig.train, idw.train_df, krig.train_df, krig_cor, idw_cor, validate_df, cactus_id, emp.train, exp.train, master_df, krig.gstat, idw.gstat, cactus, coords, emp.gstat, exp.gstat, maxdist, train_n, gstat.veg, new.grid.1m)
+```
+
+## **Elevation Data**
+### Question 9
+**9) Use the code on Lines 308 to 332 to download elevation data and prepare the raster for the following kriging exercise. First, crop the extent and aggregate with the supplied code. (5 pts)**  
+
+```{r}
+#download elevation code
+srtm <- getData('SRTM', lon=-106, lat=39) #this will download WorldClim Data at these coordinates. SRTM is for elevation.
+#check here: https://www.gis-blog.com/r-raster-data-acquisition/
+e <- extent(-107.5, -107, 37.5, 38)
+srtm=crop(srtm, e)
+# grid_e <- extent(new.grid)
+                #aggregate to reduce computation
+srtm = aggregate(srtm, fact=10, fun=mean) #mean value
+#plot(srtm)
+```
+
+Next, take a random selection of 500 points from the elevation surface.
+
+```{r}
+#make a random elevation of 500 points
+set.seed(2020)
+srtm_pts=as.data.frame(sampleRandom(srtm, 500, xy=T))
+colnames(srtm_pts)[3]="elevation"
+```
+
+Using the code and knowledge gained through this lab, use kriging to interpolate elevation across the landscape using the 500 randomly selected points.
+```{r}
+#Create grid with intervals of 0.008333333 degree)
+new.grid<- raster(e, resolution=res(srtm))
+new.grid= as.data.frame(new.grid, xy=TRUE)
+new.grid=new.grid[,1:2]
+gridded(new.grid) = ~x + y
+
+# Calculate distance matrix of srtm_pts
+coords <- cbind(srtm_pts$x, srtm_pts$y)
+colnames(coords) <- c("x", "y")
+distmat <- as.matrix(dist(coords))
+
+#Maximum distance to consider in correlogram/variogram (~1/2 to 2/3 total dist)
+maxdist <- 2/3*max(distmat)
+
+# Krige using gstat
+gstat.srtm <- srtm_pts
+coordinates(gstat.srtm) = ~x + y
+emp.gstat <- variogram(elevation ~ 1, width=.02, data=gstat.srtm)
+plot(emp.gstat)
+Sph.gstat <- fit.variogram(emp.gstat, vgm("Sph"))
+Exp.gstat <- fit.variogram(emp.gstat, vgm("Exp"))
+Gau.gstat <- fit.variogram(emp.gstat, vgm("Gau"))
+Mat.gstat <- fit.variogram(emp.gstat, vgm("Mat"))
+
+# Ordinary kriging
+krig.Sph <- gstat::krige(elevation ~ 1, gstat.srtm, new.grid, model = Sph.gstat)
+plot(krig.Sph)
+krig.Exp <- gstat::krige(elevation ~ 1, gstat.srtm, new.grid, model = Exp.gstat)
+krig.Gau <- gstat::krige(elevation ~ 1, gstat.srtm, new.grid, model = Gau.gstat)
+krig.Mat <- gstat::krige(elevation ~ 1, gstat.srtm, new.grid, model = Mat.gstat)
+```
+
+Crop the SRTM to new grid
+```{r}
+# Convert srtm and kriged predictions to data frames
+srtm_df <- as.data.frame(srtm)
+pred_df = tibble(   x = as.data.frame(krig.Exp)$x,
+                    y = as.data.frame(krig.Exp)$y,
+                    Exp_pred = as.data.frame(krig.Exp)$var1.pred,
+                    Sph_pred = as.data.frame(krig.Sph)$var1.pred,
+                    Gau_pred = as.data.frame(krig.Gau)$var1.pred,
+                    Mat_pred  =as.data.frame(krig.Mat)$var1.pred)
+
+srtm_df <- cbind(srtm_df, x = pred_df$x, y = pred_df$y)
+
+# Calculate correlations for each model against the srtm data
+cor_df = tibble( Type = 'Pearson correlation',
+               Exp = round(cor(pred_df$Exp_pred, srtm_df$srtm_15_05), 3),
+               Gau = round(cor(pred_df$Gau_pred, srtm_df$srtm_15_05), 3),
+               Mat = round(cor(pred_df$Mat_pred, srtm_df$srtm_15_05), 3),
+               Sph = round(cor(pred_df$Sph_pred, srtm_df$srtm_15_05), 3))
+
+knitr::kable(cor_df, caption = 'Pearson correlations of each of the kriging models')
+```
+
+**a) What model fits best to the empirical variogram? Which did you try?**  
+**Answer:** I tried the spherical, exponential, matern, and gaussian. In terms of both an ocular assessment of variance in spatial pattern and correlation values, the spherical model performed best, though only marginally
+
+**b) Does your model perform better than inverse distance weighting? Provide the correlation between inverse distance weighting predictions and the known elevation.** 
+
+```{r}
+idw.gstat <- idw(elevation ~ 1, gstat.srtm, new.grid)
+idw_df <- as.data.frame(idw.gstat)
+
+sph_cor <- round(cor(pred_df$Sph_pred, srtm_df$srtm_15_05), 3)
+idw_cor <- round(cor(idw.gstat$var1.pred, srtm_df$srtm_15_05), 3)
+```
+
+**Answer:** The spherical model produced a correlation coefficient to the SRTM data of `r sph_cor`, while the inverse distance weighting produced a correlation coefficient of `r idw_cor`, so kriging performed better. Additionally, each of the kriged models performed better than IDW for this dataset.
+
+**c) Provide the correlation between your best kriged model predictions and the known elevation. **  
+**Answer:** Answered above, but the correlation coefficent of the spherical model is `r sph_cor`
+
+**d) Make a four-panel plot that includes the randomly sampled points (shaded by elevation) and raster elevations from kriging, inverse distance weighting, and the truth. See example q9_heat_maps.pdf. Use ggplot to generate the graphic. **  
+
+**Answer:**
+Create the plots
+```{r fig.width=8,fig.height=10}
+gg_idw <- ggplot(data = idw_df, aes(x = x, y = y)) +
+  geom_raster(mapping = aes(fill = var1.pred)) +
+  scale_fill_gradientn(colours = terrain.colors(10)) +
+  xlab("Longitude (°)") + ylab("Latitude (°)") + labs(fill = 'Elevation (m)') +
+  ggtitle('Inverse distance weighting') +
+  theme_hc()
+
+gg_kri <- ggplot()+
+  geom_raster(data = pred_df, aes(x = x, y = y, fill = Sph_pred)) +
+  scale_fill_gradientn(colours = terrain.colors(10)) +
+  xlab("Longitude (°)") + ylab("Latitude (°)") + labs(fill = 'Elevation (m)') +
+  ggtitle('Kriging') +
+  theme_hc()
+
+gg_srtm <- ggplot()+
+  geom_raster(data = srtm_df, aes(x = x, y = y, fill = srtm_15_05)) +
+  scale_fill_gradientn(colours = terrain.colors(10)) +
+  xlab("Longitude (°)") + ylab("Latitude (°)") + labs(fill = 'Elevation (m)') +
+  ggtitle('True elevation') +
+  theme_hc()
+
+gg_pts = ggplot()+
+  geom_point(data = srtm_pts, aes(x = x, y = y, color = srtm_pts$elevation)) +
+  scale_colour_gradientn(colours = terrain.colors(10)) +
+  xlab("Longitude (°)") + ylab("Latitude (°)") + labs(color = 'Elevation (m)') +
+  ggtitle('Sampling points') +
+  theme_hc()
+
+# plot using patchwork
+(gg_idw | gg_kri) /
+(gg_srtm | gg_pts)
+```
+

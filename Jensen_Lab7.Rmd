@@ -1,0 +1,391 @@
+---
+title: 'Lab 7: Space Use and Resource Selection'
+author: "Eric Jensen"
+date: "March 23, 2020"
+output: html_document
+---
+
+#Fletcher and Fortin 2019
+#Chapter 8: Space Use and Resource Selection
+## Florida panther home range
+
+```{r, echo = F, message = F}
+#load packages
+
+library(raster)           #for raster covariate data; version 2.6-7 used
+library(reshape2)         #for re-formatting data; version 1.4.3 used
+library(rgdal)            #for reading different types of GIS files; version 1.3-4 used
+library(adehabitatLT)     #for trajectory information; version 0.3.23 used
+library(adehabitatHR)     #Home range estimation; version 0.4.15 used
+library(adehabitatHS)     #for selection ratios; version 0.3.13 used
+library(survival)         #for conditional logit model; version 2.42-3 used
+library(tidyverse)
+library(sf)
+library(patchwork)
+library(RColorBrewer)
+```
+
+```{r}
+#set working directory where data were downloaded
+setwd("C:/Users/erjensen/Documents/ECOL620/Lab7/data_for_lab7/")
+
+###################################################
+#8.3.2 Prepping the data
+###################################################
+
+#landcover source: fwc/fnai
+land <- raster("C:/Users/erjensen/Documents/ECOL620/Lab7/data_for_lab7/panther_landcover")
+
+#Add panther data
+panthers <- readOGR("panthers.shp")
+
+#label projection for later use
+crs.land <- projection(land)
+```
+### Question 1
+**1) Within the "panthers" SpatialPointsDataFrame, there are three columns of information. Describe what each represents. (1 pt)**  
+**Answer:** CatID is the unique identifier for each panther, Juldate is the Julian date for each GPS point location collected, AgeClass relates to the age class (adult or sub-adult) of the panther that the GPS point came from.  
+```{r}
+#load reclassification table for reclassifying map
+classification <- read.table(file = "C:/Users/erjensen/Documents/ECOL620/Lab7/data_for_lab7/landcover reclass.txt", header=TRUE)
+
+#format for reclassify function;
+class <- as.matrix(classification[,c(1,3)])
+land_sub <- reclassify(land,rcl=class)
+
+#create forested wetlands layer
+wetforest <- land_sub
+values(wetforest) <- 0
+wetforest[land_sub==9 | land_sub==11] <- 1
+
+#create forested uplands layer
+dryforest <- land_sub
+values(dryforest) <- 0
+dryforest[land_sub==10 | land_sub==12] <- 1
+
+#5 km moving window to get neighborhood proportion
+fw <- focalWeight(land_sub, 5000, 'circle')
+dry.focal <- focal(dryforest, w=fw, fun="sum", na.rm=T)
+wet.focal <- focal(wetforest, w=fw, fun="sum", na.rm=T)
+
+#merge into a single raster stack
+layers <- stack(land_sub, wet.focal, dry.focal)
+names(layers) <- c("landcover", "wetforest", "dryforest")
+```
+
+### Question 2
+**2) Describe what lines 78-80 are achieving. What is "fw" and how is it used in the "focal" function? (1 pt)**  
+**Answer:** The focal function is calculating a focal grid based on a moving window of pixels within 5 km. This means that for each pixel in the grid the function runs some calculation (in this case a sum) to populate the value for that cell in the new focal grid. The "w" argument is a matrix of weights which is defined as fw in our function which is a circle of 5000 meter radius.  
+
+### Question 3
+**3) Plot the minimum convex polygon for panther #137. Show the raw locations (points) and the 50%, 75%, and 95% minimum convex polygons. See the example "MCP_panther137.pdf" for reference. (2 pts)**  
+
+```{r}
+#subset panthers sp points object to only panther 137
+panther137 <- as_tibble(panthers[panthers$CatID==137, ]) %>% rename(coords.x = coords.x1,coords.y = coords.x2)
+
+#Calculate minimum convex polygons for each of the percents of interest
+mcp95 <- mcp(panthers[,"CatID"], percent = 95)
+mcp75 <- mcp(panthers[,"CatID"], percent = 75)
+mcp50 <- mcp(panthers[,"CatID"], percent = 50)
+
+#Subset the mcp objects to only panther 137
+pan137_mcp95 <- mcp95[mcp95$id==137,]
+pan137_mcp75 <- mcp75[mcp95$id==137,]
+pan137_mcp50 <- mcp50[mcp95$id==137,]
+
+#Full ggplot
+ggplot()+
+  geom_polygon(data = pan137_mcp95, mapping = aes(x = long, y = lat, group = group), color = 'black', fill = 'yellow')+
+  geom_polygon(data = pan137_mcp75, mapping = aes(x = long, y = lat, group = group), color = 'black', fill = 'green')+
+  geom_polygon(data = pan137_mcp50, mapping = aes(x = long, y = lat, group = group), color = 'black', fill = 'blue')+
+  geom_point(data = panther137, mapping = aes(x = panther137$coords.x, y = panther137$coords.y))+
+  ggtitle('Minimum Convex Hull Polygon: Panther 137')+
+  xlab('Easting (m)') + ylab('Northing (m)')+
+  theme_classic()
+```
+
+Remove the objects created for the mcp plot and no longer needed
+```{r}
+remove(mcp75,pan137_mcp50,pan137_mcp75,pan137_mcp95,panther137)
+```
+
+### Question 4
+**4) Plot the minimum convex polygon for all panthers overlaid on the reclassified landcover raster. Show the 50% and 95% minimum convex polygons. See the example "MCP_all_panther.png" for reference. (3 pts) **
+
+```{r}
+#Add landcover_f column to classification dataframe
+classification <- mutate(classification, Landcover_f = as.factor(ChangeTo))
+
+land_sub_df <- as.data.frame(land_sub, xy=T) %>%
+                    mutate(Landcover_f = as.factor(gfchab_500cl2)) %>%
+                    left_join(classification, by = 'Landcover_f') %>%
+                    drop_na()
+      
+colourCount <- nrow(dplyr::select(land_sub_df,'Description2') %>% unique())
+getPalette <- colorRampPalette(brewer.pal(8, "Accent"))
+
+ggplot()+
+  geom_raster(land_sub_df, mapping = aes(x=x, y=y, fill = Description2))+
+  scale_fill_manual(values = getPalette(colourCount))+
+  geom_polygon(data = mcp50, mapping = aes(x = long, y = lat, group = group), fill = 'grey20', alpha = .7)+
+  geom_polygon(data = mcp95, mapping = aes(x = long, y = lat, group = group), color = 'black', fill = NA, cex = 1)+
+  ggtitle('Minimum Convex Hull Polygon')+
+  labs(x = 'Easting (m)', y = 'Northing (m)', fill = 'Landcover class') +
+  theme_classic()
+```
+
+Remove objects for Panther 137 plot that are not needed going forward
+```{r}
+remove(colourCount, land_sub_df, getPalette)
+```
+
+### Question 5
+**5) For all panthers, create a four-panel plot showing the home ranges as estimated by: minimum convex polygon, fixed bivariate kernel home range, local convex hull home range, and Brownian bridge. For each approach, plot the 95% contours. Hint, for the local convex hull home range, I used the "LoCoH.k" function with a k of 12. (4 pts).**
+
+Minimum convex polygon--95% contour
+```{r}
+mcp95.sf <- st_as_sf(mcp95)
+
+#ggplot
+mcp_gg <- ggplot()+
+  geom_sf(mcp95.sf, mapping = aes(fill = id, color = id), alpha = .8)+
+  labs(title = 'Minimum Convex Hull Polygon', x = 'Longitude', y = 'Latitude', fill = 'Panther ID', color = "Panther ID") +
+  coord_sf(crs = 4326, datum = st_crs(4326), xlim = c(-80.5,-82), ylim = c(25.7, 27.7))+
+  scale_x_continuous(breaks = c(-81,-81.5))+
+  scale_y_continuous(breaks = c(26,26.5,27,27.5))+
+  theme_classic()
+```
+
+Fixed bivariate kernel home range--95% contour
+```{r}
+#Using bivariate normal kernel:
+kernel.href.bivar <- kernelUD(panthers[,"CatID"], h="href", kern="bivnorm")
+#get an SP object of 95% contour polygon
+kernal.href.bivar.95<- getverticeshr(kernel.href.bivar, percent = 95)
+#convert sp object to sf
+kernal.href.bivar.95.sf <- st_as_sf(kernal.href.bivar.95)
+
+# ggplot
+kernel_gg <- ggplot()+
+  geom_sf(kernal.href.bivar.95.sf, mapping = aes(fill = id, color = id), alpha = .8)+
+  labs(title = 'Bivariate Kernel', x = 'Longitude', y = 'Latitude', fill = 'Panther ID', color = "Panther ID") +
+  coord_sf(crs = 4326, datum = st_crs(4326), xlim = c(-80.5,-82), ylim = c(25.7, 27.7))+
+  scale_x_continuous(breaks = c(-81,-81.5))+
+  scale_y_continuous(breaks = c(26,26.5,27,27.5))+
+  theme_classic()
+```
+
+Local convex hull home range--95% contour
+Note: Kyle used the "LoCoH.k" function with a k of 12.
+```{r}
+# Calculate convex hulls for each individual panther
+LoCoH.k.100 <- LoCoH.k(SpatialPoints(coordinates(panthers[panthers$CatID==100,])), k=12)
+LoCoH.k.130 <- LoCoH.k(SpatialPoints(coordinates(panthers[panthers$CatID==130,])), k=12)
+LoCoH.k.131 <- LoCoH.k(SpatialPoints(coordinates(panthers[panthers$CatID==131,])), k=12)
+LoCoH.k.137 <- LoCoH.k(SpatialPoints(coordinates(panthers[panthers$CatID==137,])), k=12)
+LoCoH.k.143 <- LoCoH.k(SpatialPoints(coordinates(panthers[panthers$CatID==143,])), k=12)
+LoCoH.k.147 <- LoCoH.k(SpatialPoints(coordinates(panthers[panthers$CatID==147,])), k=12)
+
+# Convert sp convex hulls to sf objects, mutate a CatID column and filter by percent < 95
+LoCoH.k.100.sf <- st_as_sf(LoCoH.k.100, crs = 4326) %>% mutate(CatID = as.factor(100)) %>% filter(percent<95)
+LoCoH.k.130.sf <- st_as_sf(LoCoH.k.130, crs = 4326) %>% mutate(CatID = as.factor(130)) %>% filter(percent<95)
+LoCoH.k.131.sf <- st_as_sf(LoCoH.k.131, crs = 4326) %>% mutate(CatID = as.factor(131)) %>% filter(percent<95)
+LoCoH.k.137.sf <- st_as_sf(LoCoH.k.137, crs = 4326) %>% mutate(CatID = as.factor(137)) %>% filter(percent<95)
+LoCoH.k.143.sf <- st_as_sf(LoCoH.k.143, crs = 4326) %>% mutate(CatID = as.factor(143)) %>% filter(percent<95)
+LoCoH.k.147.sf <- st_as_sf(LoCoH.k.147, crs = 4326) %>% mutate(CatID = as.factor(147)) %>% filter(percent<95)
+
+# Bind all columns for plotting
+LoCoH.k.all.sf <- rbind(LoCoH.k.100.sf, LoCoH.k.130.sf, LoCoH.k.131.sf, LoCoH.k.137.sf, LoCoH.k.143.sf, LoCoH.k.147.sf)
+LoCoH.k.all.sf  = st_set_crs(LoCoH.k.all.sf, crs.land)
+
+# ggplot
+LoCoH_gg <-ggplot()+
+  geom_sf(LoCoH.k.all.sf, mapping = aes(fill = CatID, color = CatID), alpha = .8)+
+  labs(title = 'Local Convex Hull', x = 'Longitude', y = 'Latitude', fill = 'Panther ID', color = "Panther ID") +
+  coord_sf(crs = 4326, datum = st_crs(4326), xlim = c(-80.5,-82), ylim = c(25.7, 27.7))+
+  scale_x_continuous(breaks = c(-81,-81.5))+
+  scale_y_continuous(breaks = c(26,26.5,27,27.5))+
+  theme_classic()
+```
+
+Brownian bridge model--95% contour
+```{r}
+#Re-format Juldate information:
+#function for taking characters of a string from rightmost value
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+
+#re-format
+panthers$Juldate <- as.character(panthers$Juldate)
+panther.date <- as.numeric(substrRight(panthers$Juldate, 3))
+panthers$Date<-as.Date(panther.date, origin=as.Date("2006-01-01"))
+
+#convert to POSIXct object
+panthers$Date <- as.POSIXct(panthers$Date,"%Y-%m-%d", tz = "EST")
+
+#convert to data frame
+panther.df <- as.data.frame(panthers)
+
+#make trajectory object
+panther.ltraj <- as.ltraj(xy=coordinates(panthers), date=panthers$Date, id=panthers$CatID, typeII=T)
+
+#telemetry error (average)
+sigma2 <- 450
+
+#estimate sigma1
+sigma1 <- liker(panther.ltraj, sig2 = sigma2, rangesig1 = c(2, 100))
+
+#brownian bridge for Cat 147
+bb.147 <- kernelbb(panther.ltraj[6], sig1 = 7.2, sig2 = sigma2, grid = 200)
+
+#all panthers
+sig1 <- c(sigma1[[1]]$sig1, sigma1[[2]]$sig1, sigma1[[3]]$sig1, sigma1[[4]]$sig1, sigma1[[5]]$sig1, sigma1[[6]]$sig1)
+bb.panther <- kernelbb(panther.ltraj, sig1 = sig1, sig2 = sigma2, grid = 200)
+
+#get an SP object of 95% contour polygon
+bb.95 <- getverticeshr(bb.panther, percent=95)
+
+#convert sp object to sf
+bb.95.sf <- st_as_sf(bb.95)
+bb.95.sf  = st_set_crs(bb.95.sf, crs.land)
+
+#ggplot
+bb_gg <- ggplot()+
+  geom_sf(bb.95.sf, mapping = aes(fill = id, color = id), alpha = .8)+
+  labs(title = 'Brownian Bridge', x = 'Longitude', y = 'Latitude', fill = 'Panther ID', color = "Panther ID") +
+  coord_sf(crs = 4326, datum = st_crs(4326), xlim = c(-80.5,-82), ylim = c(25.7, 27.7))+
+  scale_x_continuous(breaks = c(-81,-81.5))+
+  scale_y_continuous(breaks = c(26,26.5,27,27.5))+
+  theme_classic()
+```
+
+#NEED TO FIX COORDINATES
+ggplot grid of the four plots
+```{r}
+(mcp_gg | kernel_gg) /
+(LoCoH_gg | bb_gg)
+```
+
+Remove objects created for the previous plots
+```{r}
+remove(bb_gg,mcp_gg,kernel_gg,LoCoH_gg,kernal.href.bivar.95,kernal.href.bivar.95.sf,LoCoH.k.100,LoCoH.k.100.sf,LoCoH.k.130,LoCoH.k.130.sf,LoCoH.k.131,LoCoH.k.131.sf,LoCoH.k.137,LoCoH.k.137.sf, LoCoH.k.143,LoCoH.k.143.sf,LoCoH.k.147,LoCoH.k.147.sf,mcp95,mcp95.sf,mcp95_crs,bb.147,bb.95,bb.95.sf,bb.panther,panther.ltraj,sigma1,fw,kernel.href.bivar,mcp50,panther.date, sig1, sigma2, substrRight, LoCoH.k.all.sf, panther.df)
+```
+
+### Question 6
+**6) If you were tasked with presenting the home range of these animals to the Florida Fish and Wildlife Commission, which would you select and why? (1 pt)**  
+**Answer:** I would select the Brownian Bridge model because it is the most robust model. The Brownian Bridge approach not only considers point locations, but also considers the sequence of points in delineating home range. Beyond even consideration of the sequence of points, it also models movement between sequential points based on direction, time interval between points, and movement speed using a random walk model. The temporal piece and modeling of movement distinguish the Brownian Bridge approach as the most robust model that we assessed,
+
+## Florida panther resource selection
+### Question 7
+**7) Within the Fletcher text, there is a distinction made between Design II and Design III resource selection sampling. What is the difference? (2 pt)**  
+**Answer:** Design II involves quantifying resource use by individuals within a population and comparing it to resource availability measured at the population level. Design III quantifies both resource use and resource availability for each individual.
+
+```{r include = FALSE}
+# #8.3.4.1 Point selection functions
+# #use data
+# use <- raster::extract(layers, panthers)
+# use <- data.frame(use)
+# 
+# #add CatID
+# use$CatID <- as.factor(panthers$CatID)
+# 
+# #reformat
+# useCatID <- dcast(use, CatID~landcover, length, value.var="CatID")
+# 
+# #add land-cover names
+# newclass.names <- unique(classification[,3:4])
+# names(useCatID) <- c("CatID", as.character(newclass.names[1:13,2]))
+```
+
+### Question 8
+**8) Lines 291 reformats the "use" dataframe. What specially does it do? (1 pt)**  
+**Answer:** The dcast function is one of the cast functions in the reshape2 package and is specifically designed for use with dataframes to convert from a long to a wide data format. Because the aggregation argument is set to the function length, the wide format is shaped essentially into a table of counts of landcover types used by each individual panther.  
+
+Design II availability: Population availability
+```{r}
+# #get availability points
+# set.seed(8)
+# rand.II <- sampleRandom(layers, size=1000)
+# rand.II <- data.frame(rand.II)
+# rand.II.land <- as.factor(rand.II$landcover)
+# 
+# #get counts of each landcover type
+# avail.II <- tapply(rand.II.land, rand.II.land, length)
+# 
+# #add land-cover names
+# names(avail.II) <- as.character(newclass.names[1:14,2])
+# 
+# #remove exotics, which were not observed in use sample
+# avail.II <- avail.II[c(-14)]
+```
+
+Design III availability: Within home-range availability for each individual
+```{r}
+# cat.unique <- unique(panthers$CatID)
+# samples <- 200
+# rand.III <- matrix(nrow=0, ncol=4)
+# 
+# #loop for all individuals
+# for(i in 1:length(cat.unique)){
+# 
+#   id.i <- cat.unique[i]
+#   cat.i <- panthers[panthers$CatID==id.i,]
+#   mcp.i <- mcp(SpatialPoints(coordinates(cat.i)), percent = 99)
+#   rand.i <- spsample(mcp.i, type="random", n=samples)
+#   rand.i.sample <- extract(layers, rand.i)
+# 
+#   #make a matrix of CatID and rand samples
+#   cat.i <- rep(cat.unique[i], length(rand.i))
+#   rand.cat.i <- cbind(cat.i, rand.i.sample)
+#   rand.III <- rbind(rand.III, rand.cat.i)
+# }
+# 
+# #reshape data
+# rand.III <- data.frame(rand.III)
+# rand.III$cat.i <- as.factor(rand.III$cat.i)
+# avail.III <- dcast(rand.III, cat.i~landcover, length, value.var="cat.i")
+```
+
+Selection ratios
+```{r}
+# ---------------------------------
+#Design II selection ratios:
+# sel.ratioII <- widesII(u = useCatID[,c(2:ncol(useCatID))],a = as.vector(avail.II),avknown = F, alpha = 0.05)
+
+# # Inspect
+# summary(sel.ratioII)
+# sel.ratioII
+# sel.ratioII$wi #selection ratios
+# sel.ratioII$se.wi #selection ratio SEs
+# plot(sel.ratioII)
+
+# ---------------------------------
+#Design III selection ratios:
+# sel.ratioIII <- widesIII(u=useCatID[,c(2:ncol(useCatID))], a=avail.III[,2:14], avknown=FALSE, alpha = 0.05)
+
+# # Inspect
+# sel.ratioIII
+# sel.ratioIII$wi
+# sel.ratioIII$se.wi
+# sel.ratioIII$ICwiupper
+# sel.ratioIII$ICwilower
+
+# #plot
+# plot(sel.ratioIII)
+```
+
+### Question 9
+**9) Calculate the Design II and Design III resource selection models. (4 pts)**  
+**a. For Design II, are all panthers using the habitats identically? Hint, explore the output of the "widesII".**  
+**Answer:** There are significant differences between how individual panthers use habitat. Whihle none of the panthers use urban or open water habitat and all rarely to never use wetland, shrub/scrub, cropland, and pasture sites, there is wide variation in the proportion of use of the remaining habitats. For each cypress swamp, upland forest, pinelands, and hardwood swamp, one to two panthers predominantly use those habitats, but there are other panthers that rately to never use each of those habitats as well. So there is a lot of variability.  
+
+**b. For Design II, which habitats are showing a positive selection? Do any habitats show a significant positive association?**  
+**Answer:** The habitats that stand out are those mentioned in the previous response. Cypress swamp, pinelands, hardwood swamp, and upland forests all have selection ratios of greater than 2. 
+
+**c. For Design III, which habitats are showing a positive selection? Do you see negative associations?**
+**Answer:**  Anthropogenic and some aquatic environments are rarely to never used by panthers. These include urban and agricultural (pasture and croplands) classes, as well as wetlands and open water. Shrub/scrub environments were also rarely used.
+
+**d. What differences do you see comparing the Design II and Design III global results for habitat selection? **  
+**Answer:**  The most obvious difference is that the coastal wetland class jumps out with a far higher selection ratio than any other class in design III, whereas it was ranked as very unimportant in the Design II calculation. Aside from that significant difference, many of the other classes were ranked in similar orders between Design II and Design III.

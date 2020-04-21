@@ -1,0 +1,377 @@
+---
+title: 'Lab 8: Species Distribution Modeling'
+author: "Eric Jensen"
+date: "April 4, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#load packages
+library(raster)           #for raster covariate data; version 2.6-7 used
+library(reshape2)         #for re-formatting data; version 1.4.3 used
+library(mgcv)             #for gams; version 1.8-24 used
+library(dismo)            #for SDMs; version 1.1-4 used
+library(randomForest)     #for random forest SDMs; version 4.6-14 used
+library(glmnet)           #needed for maxnet; version 2.0-16 used
+library(MuMIn)            #for model selection; version 1.42.1 used
+library(PresenceAbsence)  #for model evaluation; version 1.1.9 used
+library(tidyverse)
+library(patchwork)
+library(knitr)
+```
+
+### Data preprocessing
+```{r}
+#set working directory where data were downloaded
+setwd("C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/")
+
+# subset point data
+vath.data.orig <- read.csv(file="C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/vath_2004.csv", header=TRUE)
+vath.val.orig <- read.csv(file="C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/vath_VALIDATION.csv", header=TRUE)
+
+#subset to presence-only / absence-only
+vath.data.xy <- as.matrix(vath.data.orig[,c("EASTING","NORTHING")])
+
+#validation data
+vath.val.xy <- as.matrix(vath.val.orig[,c("EASTING","NORTHING")])
+```
+
+Import and process raster data
+```{r}
+#covariate maps
+elev <- raster("C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/elev.gri")                 #elevation layer
+canopy <- raster("C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/cc2.gri")                #linear gradient in canopy cover taken from PCA
+mesic <- raster("C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/mesic.gri")               #presence of mesic forest
+precip <- raster("C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/precip.gri")             #mean precip (cm)
+
+#resample to align layers
+mesic <- resample(x=mesic, y=elev, "ngb")            #nearest neighbor (categorical)
+precip <- resample(x=precip, y=elev, "bilinear")     #for continuous data
+
+#crop to same extent
+mesic <- mask(mesic, elev)
+precip <- mask(precip, elev)
+
+#make 1 km wet forest
+fw.1km <- focalWeight(mesic, 1000, 'circle')           #buffer in CRS units
+mesic1km <- focal(mesic, w=fw.1km, fun="sum", na.rm=T)
+
+#create raster stack
+layers <- stack(canopy, elev, mesic, mesic1km, precip)
+names(layers) <- c("canopy", "elev", "mesic", "mesic1km", "precip")
+
+#drop correlated layer (mesic)
+layers <- dropLayer(layers, 3)
+```
+
+```{r}
+remove(mesic)
+```
+
+Extract covariates from rasters
+```{r}
+#extract GIS data
+data.cov <- raster::extract(layers, vath.data.xy)          #extracts values from layers at all 2004 locations
+val.cov <- raster::extract(layers, vath.val.xy)            #extracts values from layers at validation locations
+
+#link data
+data.cov <- data.frame(vath.data.xy, data.cov)
+val.cov <- data.frame(vath.val.xy, val.cov)
+
+#join original dataframe pres-abs to data.cov
+vath.data.pa <- select(vath.data.orig, c('EASTING', pres = 'VATH'))
+vath.val.pa <- select(vath.val.orig, c('EASTING', pres = 'VATH'))
+data.cov <- left_join(data.cov, vath.data.pa, by = 'EASTING')
+val.cov <- left_join(val.cov, vath.val.pa, by = 'EASTING')
+
+#remove any potential NAs
+data.cov <- data.cov[complete.cases(data.cov),]
+val.cov <- val.cov[complete.cases(val.cov),]
+
+# rename data.cov to all.cov to be compatible with previous script
+all.cov <- data.cov
+```
+
+```{r}
+remove(vath.data.pa, vath.val.pa, vath.val.xy)
+```
+
+#### Question 1
+**1) For the five models used in this exercise (envelope, GAM, GLM, Random Forest, and Maxent), list a pro AND con of each approach. (3 pts)**  
+**Answers:**  
+**- Envelope:** One strength is that envelope models are easy to run and useful for exploring univariate relationships between predictors and presence. A drawback is that because the models are **presence-only, they may model the fundamental niche and have difficulty modeling the realized niche.
+**- GAM:** One of the strengths of GAMs is that they are able to model non-linear response variables. However, a drawback is that with increasing numbers of knots it is easy to overfit the data and produce a poor predictive model.  
+**- GLM:** GLMs have the advantage of being easy to write and arguably being most interpretable by non-scientists because of the prominence of linear modeling in basic statistics. However, they are limited in niche modeling in that they may not adequately model non-linear responses.  
+**- Random Forests:** As a machine learning approach, Random Forests are able to quickly comb through large numbers of predictor variables and model complex non-linear relationships. The Fletcher chapter did not discuss drawbacks of RandomForests, though the models performed poorly; one drawback is that it may be easy to build models that do not reflect ecological theory simply by throwing vast numbers of predictor variables at the models. These models may be decent at predicting phenomena, but they will probably do less to advance theory than modeling rooted in ecological mechanisms.  
+**- Maxent:** Maxent models are useful because they perform well on presence-only data, which is a requirement for many datasets. However, the algorithm is fairly opaque and so there is potential for researchers or lay users to apply the models without being able to properly interpret the outputs.  
+
+#### Question 2
+**2) Generate a two-panel map of the study extent that includes the underlying elevation and the presence and absence observations. Include one panel for 2004 and one for the 2007-2008 data. Color points blue for presence and red for absence (see "q2_sampling.pdf"). Bird fun fact, ornithologists use four letter codes to denote species common names. In this case, Varied Thrush translates to VATH. (2 pts)**
+
+```{r}
+elev_df <- as.data.frame(elev, xy= T) %>% drop_na()
+
+gg_data <- ggplot()+
+  geom_raster(elev_df, mapping = aes(x=x, y=y, fill = elev_km))+
+  geom_point(vath.data.orig, mapping = aes(x = EASTING, y = NORTHING, color = as.factor(VATH)))+
+  scale_fill_continuous(low = 'black', high = 'white')+
+  labs(y='Northing (m)', x = 'Easting (m)', title = '2004 data', fill = 'Elevation (km)')+
+  guides(color = F)+
+  theme_classic()+
+  theme(legend.position = 'bottom')
+
+gg_val <- ggplot()+
+  geom_raster(elev_df, mapping = aes(x=x, y=y, fill = elev_km))+
+  geom_point(vath.val.orig, mapping = aes(x = EASTING, y = NORTHING, color = as.factor(VATH)))+
+  scale_fill_continuous(low = 'black', high = 'white')+
+  labs(y='Northing (m)', x = 'Easting (m)', title = '2007-2008 data', fill = "Elevation (km)")+
+  guides(color = F)+
+  theme_classic()+
+  theme(legend.position = 'bottom')
+
+(gg_data | gg_val)
+```
+
+```{r}
+remove(gg_data, gg_val, elev_df)
+```
+
+#### Question 3
+**3) The example code from Fletcher and Fortin is formulated for the use of presence-only information, albeit at times with synthetic absence information. Why do you think they have ignored the true absence information? (1 pt)**  
+**Answer:** One reason may be to make the demonstrated approach more flexible. It is very common for researchers to be working with presence-only data and by using presence-only data (populated with pseudo-absences when needed) for their materials, the exercises become useful for researchers both with presence-only and presence-absence data. As we are demonstrating in this lab, it is very easy to take the code that Fletcher created and simply swapping in true absences for the pseudo-absences.
+
+### Apply various modeling approaches  
+
+#### Question 4
+**4) Using the existing code, build the GLM, GAM, and random forest models using the true presence AND absence information in the "vath_2004.csv". You can direct the model construction as you see fit. Create a three-panel plot of the predicted occurrence for the three presence-absence models generated (see "q4_maps.pdf"). (7 pts)**  
+
+**GLM**
+```{r}
+glm.vath <- glm(pres~canopy+elev+I(elev^2)+mesic1km+precip, family=binomial(link=logit), data=all.cov)
+
+#mapping
+glm.map <- predict(layers, glm.vath, type="response")
+glm.map.df <- as.data.frame(glm.map, xy = T) %>% drop_na()
+
+#ggplot
+gg_glm <- ggplot()+
+  geom_raster(glm.map.df, mapping = aes(x=x, y=y, fill = layer))+
+  scale_fill_viridis_c(limits = c(0,1.05), breaks=c(seq(0,1,.25)))+
+  labs(y='Northing (m)', x = 'Easting (m)', title = 'GLM', fill = "Occurance")+
+  theme_classic()+
+  theme(legend.position = 'bottom')
+```
+
+**GAM**
+```{r}
+#Manually alter the number of knots
+gam.vath <- gam(pres~s(canopy)+s(elev)+s(mesic1km)+s(precip), family=binomial(link=logit), method="ML", data=all.cov)
+
+#mapping
+gam.map <- predict(layers, gam.vath, type="response")
+gam.map.df <- as.data.frame(gam.map, xy = T) %>% drop_na()
+
+#ggplot
+gg_gam <- ggplot()+
+  geom_raster(gam.map.df, mapping = aes(x=x, y=y, fill = layer))+
+  scale_fill_viridis_c(limits = c(0,1.05), breaks=c(seq(0,1,.25)))+
+  labs(y='Northing (m)', x = 'Easting (m)', title = 'GAM', fill = 'Occurance')+
+  theme_classic()+
+  theme(legend.position = 'bottom')
+```
+
+**Random Forests**
+```{r}
+#random forest model (default)
+rf.vath <- randomForest(as.factor(pres) ~ canopy+elev+mesic1km+precip, na.action=na.omit, data=all.cov)
+
+#tuning model
+#rf.vath.tune <- tuneRF(y=as.factor(all.cov$pres), x = all.cov[,c(3:6)], stepFactor=0.5, ntreeTry=500)
+
+#update rf model with mtry=1 based on tuning
+# rf.vath <- randomForest(as.factor(pres) ~ canopy+elev+mesic1km+precip, mtry=1, ntree=500, na.action=na.omit, data=all.cov)
+
+#mapping
+rf.map <- predict(layers, rf.vath, type="prob",index=2)
+rf.map.df <- as.data.frame(rf.map, xy = T) %>% drop_na()
+
+#ggplot
+gg_rf <- ggplot()+
+  geom_raster(rf.map.df, mapping = aes(x=x, y=y, fill = layer))+
+  scale_fill_viridis_c(limits = c(0,1.05), breaks=c(seq(0,1,.25)))+
+  labs(y='Northing (m)', x = 'Easting (m)', title = 'Random Forest', fill = 'Occurance')+
+  theme_classic()+
+  theme(legend.position = 'bottom')
+```
+
+Plot together through patchwork
+```{r fig.width=9,fig.height=4}
+(gg_glm | gg_gam | gg_rf)
+```
+
+```{r}
+remove(gg_glm, gg_gam, gg_rf, gam.map, gam.map.df, glm.map, glm.map.df, rf.map, rf.map.df)
+```
+
+#### Question 5
+**5) For these three models, generate the partial dependence plots. If possible, generalize across the models to describe the association of Varied Thrush occurrence with the predictors. (4 pts)**  
+**Answer:** The three models seem to agree fairly well for both elevation and precipitation. Varied thrush seem to prefer mid-elevation sites generally between 750 and 1750 meters and seem to prefer precipitation regimes above 150 cm per year. For canopy and mesic predictors, the relationships between the three models are more complex, though GLM and GAM models largely agree. For mesic habitat, it seems that varied thrush prefer sites surrounded by high proportions of mesic habitat. For canopy cover, random forests seem to disagree with the GAM and GLM. GAM and GLM show that varied thrush prefer higher gradient of canopy cover, whereas random forest shows a bi-modal distribution at values below -.5 and above .5.
+
+```{r}
+#Generate availability/background points using dismo
+back.xy <- randomPoints(layers, p=vath.data.xy, n=2000)
+
+#extract GIS data
+back.cov <- raster::extract(layers, back.xy)               #extracts values from layers at random locations
+
+#link data
+back.cov <- data.frame(back.xy, back.cov, pres=0)
+
+#remove any potential NAs
+back.cov <- back.cov[complete.cases(back.cov),]
+```
+
+
+```{r}
+#median of each variable
+elev.median <- median(back.cov$elev, na.rm=T)
+canopy.median <- median(back.cov$canopy, na.rm=T)
+precip.median <- median(back.cov$precip, na.rm=T)
+mesic1km.median <- median(back.cov$mesic1km, na.rm=T)
+
+#range
+elev.range <- seq(min(back.cov$elev, na.rm=T), max(back.cov$elev, na.rm=T), length=100)
+canopy.range <- seq(min(back.cov$canopy, na.rm=T), max(back.cov$canopy, na.rm=T), length=100)
+precip.range <- seq(min(back.cov$precip, na.rm=T), max(back.cov$precip, na.rm=T), length=100)
+mesic1km.range <- seq(min(back.cov$mesic1km, na.rm=T), max(back.cov$mesic1km, na.rm=T), length=100)
+
+#Data frame of new data
+elev.partial.data <- data.frame(expand.grid(elev=elev.range, canopy=canopy.median, precip=precip.median, mesic1km=mesic1km.median))
+canopy.partial.data <- data.frame(expand.grid(elev=elev.median, canopy=canopy.range, precip=precip.median, mesic1km=mesic1km.median))
+precip.partial.data <- data.frame(expand.grid(elev=elev.median, canopy=canopy.median, precip=precip.range, mesic1km=mesic1km.median))
+mesic1km.partial.data <- data.frame(expand.grid(elev=elev.median, canopy=canopy.median, precip=precip.median, mesic1km=mesic1km.range))
+```
+
+```{r}
+#Predict onto new data
+glm.pred.elev <- predict(glm.vath, elev.partial.data,type="response")
+glm.pred.canopy <- predict(glm.vath, canopy.partial.data,type="response")
+glm.pred.precip <- predict(glm.vath, precip.partial.data,type="response")
+glm.pred.mesic1km <- predict(glm.vath, mesic1km.partial.data,type="response")
+
+gam.pred.elev <- predict(gam.vath, elev.partial.data,type="response")
+gam.pred.canopy <- predict(gam.vath, canopy.partial.data,type="response")
+gam.pred.precip <- predict(gam.vath, precip.partial.data,type="response")
+gam.pred.mesic1km <- predict(gam.vath, mesic1km.partial.data,type="response")
+
+rf.pred.elev <- predict(rf.vath, elev.partial.data, type="prob")
+rf.pred.canopy <- predict(rf.vath, canopy.partial.data, type="prob")
+rf.pred.precip <- predict(rf.vath, precip.partial.data, type="prob")
+rf.pred.mesic1km <- predict(rf.vath, mesic1km.partial.data, type="prob")
+rf.pred.elev <- rf.pred.elev[,2]
+rf.pred.canopy <- rf.pred.canopy[,2]
+rf.pred.precip <- rf.pred.precip[,2]
+rf.pred.mesic1km <- rf.pred.mesic1km[,2]
+
+#Data frame for plots
+part.elev.df <- data.frame(elevation=elev.range, glm=glm.pred.elev, gam=gam.pred.elev, rf=rf.pred.elev)
+part.canopy.df <- data.frame(canopy=canopy.range, glm=glm.pred.canopy,gam=gam.pred.canopy,rf=rf.pred.canopy)
+part.precip.df <- data.frame(precip=precip.range, glm=glm.pred.precip,gam=gam.pred.precip,rf=rf.pred.precip)
+part.mesic1km.df <- data.frame(mesic1km=mesic1km.range, glm=glm.pred.mesic1km,gam=gam.pred.mesic1km,rf=rf.pred.mesic1km)
+
+# Clean up the environment by removing all but the partial data frames
+rm(list = setdiff(ls(), c('part.elev.df','part.canopy.df','part.precip.df','part.mesic1km.df', 'val.cov', 'glm.vath','gam.vath','rf.vath',"canopy", "elev", "mesic1km", "precip", 'vath.val.orig')))
+```
+
+```{r}
+# Melt dataframes for easier plotting
+part.elev.df <- melt(part.elev.df, id = 'elevation')
+part.canopy.df <- melt(part.canopy.df, id = 'canopy')
+part.precip.df <- melt(part.precip.df, id = 'precip')
+part.mesic1km.df <- melt(part.mesic1km.df, id = 'mesic1km')
+
+# Create ggplots
+# elevation
+gg_elev <- ggplot(data = part.elev.df)+
+  geom_line(mapping = aes(x = elevation, y = value, color = variable))+
+  labs(y = "Predicted value", x = "Elevation (km)", color = "Method")
+
+# canopy cover
+gg_cano <- ggplot(data = part.canopy.df)+
+  geom_line(mapping = aes(x = canopy, y = value, color = variable))+
+  labs(y = "Predicted value", x = "Linear Gradient of Canopy Cover", color = "Method")
+
+# precipitation
+gg_prec <- ggplot(data = part.precip.df)+
+  geom_line(mapping = aes(x = precip, y = value, color = variable))+
+  labs(y = "Predicted value", x = "Precipitation (cm)", color = "Method")
+
+# mesic habitat
+gg_mesi <- ggplot(data = part.mesic1km.df)+
+  geom_line(mapping = aes(x = mesic1km, y = value, color = variable))+
+  labs(y = "Predicted value", x = "% Mesic Habitat within 1 km", color = "Method")
+```
+
+Plot with patchwork
+```{r}
+(gg_elev | gg_cano) /
+(gg_mesi | gg_prec) & theme_classic()
+```
+
+#### Question 6
+**Do your models show improvement as compared to the "presence only" models? Be sure you are comparing apples-to-apples regarding the model construction. For instance, does the model you are comparing have the same predictors? Examine the Model Evaluation section for techniques in formalizing your conclusion. (3 pts)**  
+**Answer:** Using the same predictors and the same modeling approaches, models trained on presence-absence data (GLM, GAM, and random forest) generally performed better than the presence-only models. For all models I used the base models without tuning for my calculations for both tables. see the two summary tables below. Each of the models had higher AUC values and only the GLM had a lower value of Cohen's Kappa. Note that I ran the presence-only models in a separate script so that this document would be somewhat more succinct. That summary table is simply imported for printing here.
+
+### Interpreting environmental relationships
+```{r}
+#predictions for validation
+val.cov.pred <- val.cov[,cbind("canopy", "elev", "mesic1km", "precip")]
+glm.val <- predict(glm.vath, val.cov.pred, type="response")
+gam.val <- predict(gam.vath, val.cov.pred, type="response")
+rf.val <- predict(rf.vath, val.cov.pred, type="prob")
+rf.val <- rf.val[,2]
+
+#PresenceAbsence data frame
+val.data <- data.frame(siteID=1:nrow(vath.val.orig), obs=vath.val.orig$VATH,
+                      glm=glm.val, gam=gam.val, rf=rf.val)
+
+#correlation among model predictions
+round(cor(val.data[,c("glm","gam","rf")], method="spearman"),2)
+
+#data frame to store summary statistics
+summary.eval <- data.frame(matrix(nrow=0, ncol=9))
+names(summary.eval) <- c("model", "auc", "corr", "ll", "threshold", "sens", "spec", "tss", "kappa")
+
+nmodels <- ncol(val.data)-2
+detach(package:glmnet)
+
+for(i in 1:nmodels){
+
+  #calculate summary statistics
+  auc.i <- auc(val.data, which.model=i)
+  kappa.opt <- optimal.thresholds(val.data, which.model=i, opt.methods=3)
+  sens.i <- sensitivity(cmx(val.data, which.model=i,threshold = kappa.opt[[2]]))
+  spec.i <- specificity(cmx(val.data, which.model=i,threshold = kappa.opt[[2]]))
+  tss.i<- sens.i$sensitivity +spec.i$specificity - 1
+  kappa.i <- Kappa(cmx(val.data, which.model=i,threshold = kappa.opt[[2]]))
+  corr.i <- cor.test(val.data[,2], val.data[,i+2])$estimate
+  ll.i <- sum(log(val.data[,i+2]*val.data[,2] + (1-val.data[,i+2])*(1-val.data[,2])))
+  ll.i <- ifelse(ll.i=="-Inf", sum(log(val.data[,i+2]+0.001)*val.data[,2] + log((1-val.data[,i+2]))*(1-val.data[,2])), ll.i)
+
+  #summarize
+  summary.i <- c(i,auc.i$AUC, corr.i, ll.i,kappa.opt[[2]], sens.i$sensitivity, spec.i$specificity, tss.i, kappa.i[[1]])
+  summary.eval <- rbind(summary.eval, summary.i)
+}
+names(summary.eval) <- c("model", "auc", "corr", "ll", "threshold", "sens", "spec", "tss", "kappa")
+
+#add model names
+summary.eval$model <- c("glm", "gam", "rf")
+
+#read in previous table
+summary.presonly <- read_csv(file = 'C:/Users/erjensen/Documents/ECOL620/Lab8/data_for_lab8/pres_model_summary.csv')
+
+#inspect
+kable(summary.eval, caption = "Summary table for presence-absence models")
+kable(summary.presonly, caption = "Summary table for presence only models")
+```

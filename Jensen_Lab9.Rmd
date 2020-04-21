@@ -1,0 +1,460 @@
+---
+title: "Lab 9: Species Distributions of Steller's Jay (*Cyanocita stelleri*)"
+author: "Eric Jensen"
+date: "April 9, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#load packages
+library(raster)           #for raster covariate data; version 2.6-7 used
+library(mgcv)             #for gams; version 1.8-24 used
+library(dismo)            #for SDMs; version 1.1-4 used
+library(randomForest)     #for random forest SDMs; version 4.6-14 used
+library(rfUtilities)
+library(glmnet)           #needed for maxnet; version 2.0-16 used
+library(MuMIn)            #for model selection; version 1.42.1 used
+library(PresenceAbsence)  #for model evaluation; version 1.1.9 used
+library(tidyverse)
+library(sf)
+library(corrplot)
+library(fmsb)             #for radar plot
+```
+
+
+### Import species response data
+Read in CSV
+```{r}
+# read in for Steller's Jay
+STJA <- read_csv(file = 'C:/Users/erjensen/Documents/ECOL620/Lab9/species_data/zero_fill_data_Cyanocitta_stelleri.csv')
+
+# Process STJA data
+# 1) Create new column of only years for later plotting
+# 2) Create new column with day for later analysis
+# 3) Convert columns to numeric and factor as needed for later modeling
+# 4) Remove unneeded columns
+# 5) Filter out non-stationary and traveling protocol_types
+# 6) Convert STJA to spatial sf object
+STJA <- STJA %>%
+  mutate(p_observation_year = as.factor(lubridate::year(observation_date))) %>%
+  mutate(p_observation_day = as.numeric(lubridate::day(observation_date))) %>%
+  mutate(observation_count = as.numeric(observation_count)) %>%
+  mutate(p_observation_hour = as.numeric(lubridate::hour(time_observations_started))) %>%
+  mutate(p_duration_minutes = duration_minutes) %>%
+  mutate(p_longitude = longitude) %>%
+  mutate(p_latitude = latitude) %>%
+  mutate(species_observed = as_factor(as.integer(species_observed))) %>%
+  mutate(county = as.factor(county)) %>%
+  select(c(checklist_id, species_observed, p_observation_year, p_observation_day, p_observation_hour, observation_count, protocol_type, p_duration_minutes, effort_distance_km, county, latitude, longitude)) %>%
+  filter(protocol_type == 'Traveling' | protocol_type == 'Stationary') %>%
+  st_as_sf(coords = c('longitude','latitude'), remove = FALSE)
+
+# Create validation set using 25% of data and modeling set with remaining 75% of data
+set.seed(10)
+STJA_val <- sample_frac(STJA, size = .25, replace = FALSE)
+STJA_model <- STJA %>%
+  mutate(drop = STJA$checklist_id %in% STJA_val$checklist_id) %>%
+  filter(drop == FALSE) %>%
+  select(-drop)
+# subset to presence and absence
+# STJA_obs <- STJA %>% filter(species_observed == TRUE)
+# STJA_abs <- STJA %>% filter(species_observed == FALSE)
+```
+
+
+### Import predictor data
+#### Predictor data provided with lab
+Read in and process raster data
+```{r}
+# # Resample to elevation to match grain
+# nlcd <- resample(x=nlcd, y=elev, 'ngb')
+# impervious <- resample(x=impervious, y=elev, 'bilinear')
+# canopy <- resample(x=canopy, y=elev, 'bilinear')
+# 
+# # Mask to elevation to match extent
+# nlcd <- mask(x=nlcd, mask=elev)
+# impervious <- mask(x=impervious, mask=elev)
+# canopy <- mask(x=canopy, mask=elev)
+# 
+# # Export to new tifs for resamples and masked 
+# writeRaster(nlcd, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd2011_re.tif')
+# writeRaster(impervious, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/percent_impervious_surface_2011_re.tif')
+# writeRaster(canopy, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/tree_canopy_percent_2011_re.tif')
+```
+
+Read in raster data that has been processed
+```{r}
+#Read raster data // I'm already loading in the resamples and clipped data from below
+p_nlcd <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd2011.tif')
+p_elev <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/elevation.tif')
+p_impervious <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/percent_impervious.tif')
+p_precip_ann <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/precip_annual_mean.tif')
+p_precip_jun <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/precip_june_mean.tif')
+p_meantemp_ann <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/temp_annual_mean.tif')
+p_maxtemp_june <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/temp_max_june.tif')
+p_meantemp_june <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/temp_mean_june.tif')
+p_mintemp_june <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/temp_min_june.tif')
+p_canopy  <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/tree_canopy_percent.tif')
+```                                                                                 
+
+#### Focal grids for each land cover class
+Calculate focal grids of each land cover class
+```{r}
+# # Use lab 4 to produce binary layers
+# # Use lab 8 to calculate focal weights
+# #create a reclassification matrix
+# nlcd.cat <- unique(p_nlcd)
+# nlcd.cat.wat <- c(1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0) #open water
+# nlcd.cat.sno <- c(0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0) #snow and ice
+# nlcd.cat.Dos <- c(0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0) #developed open space
+# nlcd.cat.Dlo <- c(0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0) #low-intensity developed
+# nlcd.cat.Dmi <- c(0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0) #mid-intensity developed
+# nlcd.cat.Dhi <- c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0) #high-intensity develooped
+# nlcd.cat.bar <- c(0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0) #barren
+# nlcd.cat.Fde <- c(0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0) #deciduous forest
+# nlcd.cat.Fco <- c(0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0) #coniferous forest
+# nlcd.cat.Fmx <- c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0) #mixed forest
+# nlcd.cat.shr <- c(0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0) #shrub classes
+# nlcd.cat.grs <- c(0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0) #grassland
+# nlcd.cat.pas <- c(0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0) #pasture/hay
+# nlcd.cat.crp <- c(0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0) #crops
+# nlcd.cat.Wwo <- c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0) #woody wetland
+# nlcd.cat.Whe <- c(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1) #emergent herbaceous wetland
+# 
+# # Function to build focal layers
+# buildFocal <- function(binary){
+#   reclass_df <- cbind(nlcd.cat, binary) # create reclassifcation data frame
+#   bi_raster <- reclassify(p_nlcd, reclass_df) # create binary raster
+#   fw <- focalWeight(bi_raster, .025, 'circle' ) # define focal weight
+#   focalLayer <- focal(bi_raster, w=fw, fun='sum', na.rm=T) #create focal layer
+#   return(focalLayer)
+# }
+# 
+# # Apply buildFocal function to each binary image and export to new rasters
+# writeRaster(buildFocal(nlcd.cat.wat), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.wat.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.sno), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.sno.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Dos), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dos.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Dlo), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dlo.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Dmi), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dmi.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Dhi), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dhi.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.bar), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.bar.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Fde), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Fde.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Fco), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Fco.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Fmx), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Fmx.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.shr), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.shr.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.grs), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.grs.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.pas), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.pas.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.crp), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.crp.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Wwo), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Wwo.tif', overwrite=TRUE)
+# writeRaster(buildFocal(nlcd.cat.Whe), 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Whe.tif', overwrite=TRUE)
+# 
+# # Remove binary images
+# remove(nlcd.cat.wat,nlcd.cat.sno,nlcd.cat.Dos,nlcd.cat.Dlo,nlcd.cat.Dmi,nlcd.cat.Dhi,nlcd.cat.bar,nlcd.cat.Fde,nlcd.cat.Fco,nlcd.cat.Fmx,nlcd.cat.shr,nlcd.cat.grs,nlcd.cat.pas,nlcd.cat.crp,nlcd.cat.Wwo,nlcd.cat.Whe, nlcd.cat,buildFocal)
+```
+
+Import focal grids
+```{r}
+p_wat_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.wat.tif')
+p_sno_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.sno.tif')
+p_Dos_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dos.tif')
+p_Dlo_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dlo.tif')
+p_Dmi_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dmi.tif')
+p_Dhi_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Dhi.tif')
+p_bar_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.bar.tif')
+p_Fde_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Fde.tif')
+p_Fco_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Fco.tif')
+p_Fmx_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Fmx.tif')
+p_shr_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.shr.tif')
+p_grs_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.grs.tif')
+p_pas_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.pas.tif')
+p_crp_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.crp.tif')
+p_Wwo_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Wwo.tif')
+p_Whe_focal <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/nlcd_focal/nlcd.cat.Whe.tif')
+```
+
+#### Selected predictor variables
+I decided to include data that would provide information on habitat structure and on vegetation health. For habitat structure, I decided to use Landfire's vegetation and canopy height layers which include canopy base height, canopy height, and vegetation height. For vegetation health, I used an NDVI product derived from MODIS data. I accessed the data through Google Earth Engine and based on the below assessment decided to create a single median composite using June images from 2010-2019. Google Earth Engine code is provided below.  
+
+![Google Earth Engine script to produce NDVI composite](C:/Users/erjensen/Documents/ECOL620/Lab9/NDVI_GEE.png)
+
+I conducted the below assessment to get some idea of the period during which most of the eBird observations were collected. The histogram reveals that the majority of observations have come from the period from 2010-2019, so I used that period to create my NDVI composite, above.
+```{r}
+# Plot a histogram of obsevations by year
+ggplot(data = STJA,aes(p_observation_year))+
+  geom_histogram(binwidth=1,stat= 'count')+
+  scale_x_discrete(breaks=seq(1964,2019,5))
+```
+
+Import and process custom predictors
+- LANDFIRE forest canopy base height, forest canopy height, existing vegetation type, and NDVI
+
+Import and prepare rasters--already ran, prepared layers are imported below 
+```{r}
+# # Function to prepare rasters based on path strings
+# prepRasters <- function(rast){
+#   # import raster
+#   rast = raster(rast)
+# 
+#   # reproject raster
+#   proj <- projection(p_elev) #get projection of elevation raster
+#   reprojected <-projectRaster(rast, crs = proj)
+# 
+#   # crop the raster to the extent of elev, state of Colorado
+#   extent <- extent(p_elev) #get extent of elevation raster
+#   cropped <- crop(reprojected, extent)
+# 
+#   # resample the raster the elevation data
+#   resampled <- resample(x=cropped, y=p_elev, 'bilinear')
+#   return(resampled)
+# }
+
+# # apply prepRasters function to rasters
+# canopy_height <- prepRasters('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/canopy_height/w001001.adf')
+# canopy_baseheight <- prepRasters('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/canopy_base_height/w001001.adf')
+# veg_height <- prepRasters('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/veg_height/w001001.adf')
+# ndvi <- prepRasters('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/NDVI_composite.tif')
+#latitude <- prepRasters('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/latitude.tif')
+#longitude<- prepRasters('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/longitude.tif')
+
+# # write new rasters as tiffs
+# writeRaster(canopy_height, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/canopy_height/canopy_height.tif')
+# writeRaster(canopy_baseheight, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/canopy_base_height/canopy_baseheight.tif')
+# writeRaster(veg_height, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/veg_height/veg_height.tif')
+# writeRaster(ndvi, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/ndvi.tif')
+# writeRaster(latitude, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/latitude.tif')
+# writeRaster(longitude, 'C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/longitude.tif')
+```
+
+Import the rasters that have already been prepared
+```{r}
+# import the new raster objects
+p_canopy_height <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/canopy_height/canopy_height.tif')
+p_canopy_baseheight <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/canopy_base_height/canopy_baseheight.tif')
+p_veg_height <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/veg_height/veg_height.tif')
+p_ndvi <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/ndvi.tif')
+p_latitude <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/latitude.tif')
+p_longitude <- raster('C:/Users/erjensen/Documents/ECOL620/Lab9/Predictors/longitude.tif')
+```
+
+#### Constant predictor variables
+```{r}
+# Function to build constant rasters
+constantRaster <- function(val){
+  
+  # Get spatial products to give to raster function
+  proj <- projection(p_elev)
+  extent <- extent(p_elev)
+  resol = res(p_elev)
+  
+  # build empty raster
+  rast <- raster(nrows = nrow(p_elev), ncols = ncol(p_elev), crs = proj, ext = extent, res = resol)
+  
+  # Populate with constant value
+  rast[] <- rep(val, ncell(rast))
+  return(rast)      }
+
+# Apply constantRaster functions for each value
+p_observation_hour <- constantRaster(median(STJA$p_observation_hour))
+p_observation_day <- constantRaster(median(STJA$p_observation_day))
+p_duration_minutes <- constantRaster(median(STJA$p_duration_minutes))
+mode_row <- STJA %>%
+  select(p_observation_year) %>%
+  group_by(p_observation_year) %>%
+  tally() %>%
+  filter(n == max(n)) %>%
+  as.matrix()
+p_observation_year <- constantRaster(as.numeric(mode_row[[1]]))
+
+# Rename the layers for later modeling
+names(p_observation_year) <- 'p_observation_year'
+names(p_observation_day) <- 'p_observation_day'
+names(p_observation_hour) <- 'p_observation_hour'
+names(p_duration_minutes) <-' p_duration_minutes'
+```
+
+```{r}
+remove(mode_row,constantRaster)
+```
+
+
+#### Compare the layers and stack them for modeling
+```{r}
+# Compare rasters
+compareRaster(p_nlcd, p_elev, p_impervious, p_precip_ann, p_precip_jun, p_meantemp_ann, p_meantemp_june, p_maxtemp_june, p_mintemp_june, p_canopy, p_wat_focal, p_sno_focal, p_Dos_focal, p_Dlo_focal, p_Dmi_focal, p_Dhi_focal, p_bar_focal, p_Fde_focal, p_Fco_focal, p_Fmx_focal, p_shr_focal, p_grs_focal, p_pas_focal, p_crp_focal, p_Wwo_focal,p_Whe_focal, p_canopy_height, p_canopy_baseheight, p_veg_height, p_ndvi, p_longitude, p_latitude, p_observation_day, p_observation_hour, p_observation_year, p_duration_minutes)
+
+# Stack rasters
+layers = stack(p_nlcd, p_elev, p_impervious, p_precip_ann, p_precip_jun, p_meantemp_ann, p_meantemp_june, p_maxtemp_june, p_mintemp_june, p_canopy, p_wat_focal, p_sno_focal, p_Dos_focal, p_Dlo_focal, p_Dmi_focal, p_Dhi_focal, p_bar_focal, p_Fde_focal, p_Fco_focal, p_Fmx_focal, p_shr_focal, p_grs_focal, p_pas_focal, p_crp_focal, p_Wwo_focal,p_Whe_focal, p_canopy_height, p_canopy_baseheight, p_veg_height, p_ndvi)
+# leave out p_longitude, p_latitude, p_obs_day, p_obs_hour, p_obs_year, p_duration because they have are native to the original data
+```
+
+### Extract predictors from raster layers
+```{r}
+#extract GIS data
+STJA_model_cov <- raster::extract(layers, STJA_model) %>% #extracts values from layers at the modeling locations
+  as_tibble() %>%
+  mutate(nlcd2011 = as.factor(nlcd2011)) # convert nlcd to a factor for modeling
+STJA_val_cov <- raster::extract(layers, STJA_val) %>% #extracts values from layers at validation locations
+  as_tibble() %>%
+  mutate(nlcd2011 = as.factor(nlcd2011)) # convert nlcd to a factor for modeling
+
+# Link data and remove columns that are not predictors
+# Drop rows with NAs for modeling
+STJA_model_cov <- data.frame(STJA_model, STJA_model_cov) %>%
+  select(-c(checklist_id, observation_count, geometry, effort_distance_km, protocol_type, county)) %>%
+  drop_na()
+STJA_val_cov <- data.frame(STJA_val, STJA_val_cov) %>%
+  select(-c(checklist_id, observation_count, geometry, effort_distance_km, protocol_type, county)) %>%
+  drop_na()
+```
+
+Assess correlations of predictors by creating predictor table--drop NLCD and other covariate predictors
+```{r}
+# Bind all rows (validation and modeling) back together to assess
+STJA_corr <- STJA_model_cov %>%
+  bind_rows(STJA_val_cov) %>%
+  select(-c(species_observed, p_observation_year,nlcd2011, nlcd.cat.Dhi)) %>% #remove response variable and non-numeric values
+  as.matrix() %>%
+  cor(method = "s")
+
+corrplot(STJA_corr)
+# Temperature shows strong correlation to itself and negative correlation to elevation, as expected. Will keep all of these variables nonetheless
+```
+
+### Modeling
+#### Random Forest
+Because of the sheer number of variables and relative lack of experience with this species, I decided to emphasize Random Forest as the modeling approach.
+```{r}
+#random forest model (default)
+rf_STJA <- randomForest(as.factor(species_observed) ~ ., na.action=na.omit, data=STJA_model_cov, ntree = 200)
+rf_STJA
+
+#tuning model
+rf_STJA_tune <- tuneRF(y=as.factor(STJA_model_cov$species_observed), x = STJA_model_cov[,c(2:ncol(STJA_model_cov))], stepFactor=0.5, ntreeTry=200)
+rf_STJA_tune 
+
+#update rf model with mtry=12 based on tuning--prioritizing accuracy in classification of Presences.
+rf_STJA_tuned <- randomForest(as.factor(species_observed) ~ ., mtry=12, ntree=200, na.action=na.omit, data=STJA_model_cov)
+rf_STJA_tuned # investigate class error, etc.
+plot(rf_STJA_tuned) # plot class error against number of trees
+varImpPlot(rf_STJA_tuned) # plot variable importance
+randomForest::importance(rf_STJA_tuned)
+```
+
+**Create radar plot of variables**  
+Link to information: https://www.r-graph-gallery.com/142-basic-radar-chart.html  
+I liked the radar plot that was in the Land sharing vs. land sparing lecture and thought it would be interesting as a way to visualize variable importance. I decided to rename my variables and place them in an order that made sense. I normalized them all by the maximum variable importantce.
+```{r}
+# Get vectors of variable importance and predictor variables
+importance = randomForest::importance(rf_STJA_tuned)
+predictors = colnames(STJA_model_cov[,c(2:ncol(STJA_model_cov))])
+
+# Create tibble of predictors and variable importance values
+imp_df <- tibble(Predictor = predictors,
+                 Importance = importance)
+
+# Convert table from long to wide
+imp_wide = pivot_wider(imp_df, names_from = Predictor, values_from =Importance)
+
+# Populate table with minima and maxima
+imp_max = max(importance)
+imp_wide = rbind(rep(imp_max, ncol(imp_wide)), rbind(rep(0,ncol(imp_wide)), imp_wide))
+imp_wide = select(imp_wide, c(Year = 'p_observation_year', Day = 'p_observation_day', Hour = "p_observation_hour", SearchTime = "p_duration_minutes", Latitude = "latitude", Longitude = "longitude", Elevation = "elevation", Impervious = "percent_impervious", AnnMeanPrcp = "precip_annual_mean", JunMeanPrcp = "precip_june_mean", AnnMeanTemp = "temp_annual_mean", JunMeanTemp ="temp_mean_june", JunMaxTemp = "temp_max_june", JunMinTemp = "temp_min_june", CanopyPercent = "tree_canopy_percent", NLCDClass = "nlcd2011", WaterF = "nlcd.cat.wat", SnowF = "nlcd.cat.sno", DevOSF = "nlcd.cat.Dos", LoDevF = "nlcd.cat.Dlo", MedDevF = "nlcd.cat.Dmi", HiDevF = "nlcd.cat.Dhi", BarrenF = "nlcd.cat.bar", DecForF = "nlcd.cat.Fde", ConForF = "nlcd.cat.Fco", MixForF = "nlcd.cat.Fmx", ShrubF = "nlcd.cat.shr", GrassF =  "nlcd.cat.grs", PastureF = "nlcd.cat.pas", CropF = "nlcd.cat.crp", WoodyWF = "nlcd.cat.Wwo", HerbWF = "nlcd.cat.Whe", Canopyheight = "canopy_height", Canopybase = "canopy_baseheight", Vegheight = "veg_height", NDVI = "ndvi"))
+
+# radar plot
+radarchart(imp_wide, axistype=1,
+            #custom polygon
+            pcol=rgb(0.2,0.5,0.5,0.9) , pfcol=rgb(0.2,0.5,0.5,0.5) , plwd=4 , 
+            #custom the grid
+            cglcol="grey75", cglty=1, axislabcol="grey75", caxislabels = c("Least important", "", "Moderately important", "", "Most important"), cglwd=0.8,
+            #custom labels
+            vlcex=0.8)
+```
+
+Prepare layers for modeling
+```{r}
+modelLayers = stack(p_nlcd, p_elev, p_impervious, p_precip_ann, p_precip_jun, p_meantemp_ann, p_meantemp_june, p_maxtemp_june, p_mintemp_june, p_canopy, p_wat_focal, p_sno_focal, p_Dos_focal, p_Dlo_focal, p_Dmi_focal, p_Dhi_focal, p_bar_focal, p_Fde_focal, p_Fco_focal, p_Fmx_focal, p_shr_focal, p_grs_focal, p_pas_focal, p_crp_focal, p_Wwo_focal,p_Whe_focal, p_canopy_height, p_canopy_baseheight, p_veg_height, p_ndvi, p_longitude, p_latitude, p_observation_day, p_observation_hour,p_observation_year, p_duration_minutes)
+```
+
+### Apply predictive modeling
+```{r}
+# Apply the model to the predictive layer
+rf_map <- predict(modelLayers, rf_STJA, type="prob",index=2)
+
+# Convert to dataframe
+rf_map_df <- as.data.frame(rf_map, xy = T) %>% drop_na()
+
+# Drop 0s for plotting
+rf_map_df_plot <- as.data.frame(rf_map, xy = T) %>% drop_na() %>% filter(layer > .05)
+
+# Create hillshade for plotting
+slope <- terrain(p_elev, opt='slope')
+aspect <- terrain(p_elev, opt='aspect')
+hill <- hillShade(slope, aspect, 40, 270)
+hill <- aggregate(hill , fact = 10 , method = "bilinear")
+hill <- crop(hill, extent(p_elev))
+
+# convert to dataframe
+hill_df <- as.data.frame(hill, xy = T) %>% drop_na() %>% filter(layer >.3)
+
+library(ggnewscale)
+library(ggthemes)
+
+# Plot with ggplot2
+ggplot()+
+ 
+  geom_raster(rf_map_df_plot, mapping = aes(x=x, y=y, fill = layer))+
+  scale_fill_viridis_c(limits = c(0,.5), breaks=c(seq(0,1,.25))) +
+  labs(fill = 'Occurence\nProbability')+
+    
+  new_scale("fill") +
+  
+  geom_raster(hill_df, mapping = aes(x=x, y=y, fill = layer)) +
+  scale_fill_gradientn(colours = grey.colors(100, start = .7, end = 1, gamma = 1, alpha = .3), guide='none') +
+    
+  labs(y='Latitude (degrees)', x = 'Longitude (degrees)', title = "Steller's Jay Occurence Probablity in Colorado", color = 'Actual\nOccurance')+
+  theme_minimal()
+```
+
+Predictive map with Presences
+```{r}
+# With presences or absences
+ggplot()+
+ 
+  geom_raster(rf_map_df_plot, mapping = aes(x=x, y=y, fill = layer))+
+  scale_fill_viridis_c(limits = c(0,.5), breaks=c(seq(0,1,.25))) +
+  labs(fill = 'Occurence\nProbability')+
+    
+  new_scale("fill") +
+  
+  geom_raster(hill_df, mapping = aes(x=x, y=y, fill = layer)) +
+  scale_fill_gradientn(colours = grey.colors(100, start = .7, end = 1, gamma = 1, alpha = .3), guide='none') +
+  
+  new_scale("fill") +
+  
+  geom_sf(STJA_val%>%filter(species_observed==1), mapping = aes(), color = 'red', size = 1)+
+    
+  labs(y='Latitude (degrees)', x = 'Longitude (degrees)', title = "Steller's Jay Occurence Probablity with Presences")+
+  theme_minimal()
+```
+
+Predictive map with absences
+```{r}
+ggplot()+
+ 
+  geom_raster(rf_map_df_plot, mapping = aes(x=x, y=y, fill = layer))+
+  scale_fill_viridis_c(limits = c(0,.5), breaks=c(seq(0,1,.25))) +
+  labs(fill = 'Occurence\nProbability')+
+    
+  new_scale("fill") +
+  
+  geom_raster(hill_df, mapping = aes(x=x, y=y, fill = layer)) +
+  scale_fill_gradientn(colours = grey.colors(100, start = .7, end = 1, gamma = 1, alpha = .3), guide='none') +
+  
+  new_scale("fill") +
+  
+  geom_sf(STJA_val%>%filter(species_observed==0), mapping = aes(), color = 'red', size = 1)+
+    
+  labs(y='Latitude (degrees)', x = 'Longitude (degrees)', title = "Steller's Jay Occurence Probablity with absences")+
+  theme_minimal()
+```
